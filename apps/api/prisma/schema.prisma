@@ -1,0 +1,236 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  passwordHash String        @map("password_hash")
+  name         String?
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  csvImports   CsvImport[]
+  contacts     Contact[]
+  templates    Template[]
+  campaigns    Campaign[]
+  gmailToken   GmailToken?
+
+  @@map("users")
+}
+
+model CsvImport {
+  id          String          @id @default(uuid())
+  userId      String          @map("user_id")
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  filename    String
+  rowCount    Int             @default(0) @map("row_count")
+  columnNames String[]        @map("column_names")
+  status      CsvImportStatus @default(PROCESSING)
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  contacts    Contact[]
+
+  @@map("csv_imports")
+}
+
+model Contact {
+  id                 String    @id @default(uuid())
+  importId           String    @map("import_id")
+  import             CsvImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  userId             String    @map("user_id")
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email              String
+  firstName          String?   @map("first_name")
+  lastName           String?   @map("last_name")
+  company            String?
+  domain             String?
+  jobTitle           String?   @map("job_title")
+  score              Int?
+  verificationStatus String?   @map("verification_status")
+  phoneNumber        String?   @map("phone_number")
+  twitter            String?
+  linkedin           String?
+  extraFields        Json?     @map("extra_fields") @db.JsonB
+  isValid            Boolean   @default(true) @map("is_valid")
+  validationErrors   String[]  @map("validation_errors")
+  tags               String[]  @default([])
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  campaignContacts   CampaignContact[]
+  emailJobs          EmailJob[]
+
+  @@map("contacts")
+}
+
+model TemplateCategory {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  createdAt DateTime   @default(now()) @map("created_at")
+
+  templates Template[]
+
+  @@map("template_categories")
+}
+
+model Template {
+  id             String               @id @default(uuid())
+  userId         String               @map("user_id")
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryId     String?              @map("category_id")
+  category       TemplateCategory?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  name           String
+  subject        String
+  bodyHtml       String               @map("body_html")
+  bodyText       String?              @map("body_text")
+  // Gender-specific variants (fall back to subject/bodyHtml/bodyText if null)
+  maleSubject    String?              @map("male_subject")
+  maleBodyHtml   String?              @map("male_body_html")
+  maleBodyText   String?              @map("male_body_text")
+  femaleSubject  String?              @map("female_subject")
+  femaleBodyHtml String?              @map("female_body_html")
+  femaleBodyText String?              @map("female_body_text")
+  variables      String[]             @default([])
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  campaigns   Campaign[]
+  emailJobs   EmailJob[]
+  attachments TemplateAttachment[]
+
+  @@map("templates")
+}
+
+model TemplateAttachment {
+  id           String   @id @default(uuid())
+  templateId   String   @map("template_id")
+  template     Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  filename     String
+  originalName String   @map("original_name")
+  mimeType     String   @map("mime_type")
+  size         Int
+  storagePath  String   @map("storage_path")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("template_attachments")
+}
+
+model Campaign {
+  id          String         @id @default(uuid())
+  userId      String         @map("user_id")
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  templateId  String?        @map("template_id")
+  template    Template?      @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  name        String
+  status      CampaignStatus @default(DRAFT)
+  scheduledAt      DateTime? @map("scheduled_at")
+  timezone         String    @default("UTC")
+  customSubject    String?   @map("custom_subject")
+  customBodyHtml   String?   @map("custom_body_html")
+  customBodyText   String?   @map("custom_body_text")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  campaignContacts CampaignContact[]
+  emailJobs        EmailJob[]
+
+  @@map("campaigns")
+}
+
+model CampaignContact {
+  id         String   @id @default(uuid())
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId  String   @map("contact_id")
+  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  gender     String?  // 'male' | 'female' — assigned during campaign creation
+
+  @@unique([campaignId, contactId])
+  @@map("campaign_contacts")
+}
+
+model EmailJob {
+  id                 String         @id @default(uuid())
+  campaignId         String         @map("campaign_id")
+  campaign           Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId          String         @map("contact_id")
+  contact            Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  templateId         String?        @map("template_id")
+  template           Template?      @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  renderedSubject    String         @map("rendered_subject")
+  renderedBodyHtml   String         @map("rendered_body_html")
+  renderedBodyText   String?        @map("rendered_body_text")
+  status             EmailJobStatus @default(SCHEDULED)
+  scheduledAt        DateTime       @map("scheduled_at")
+  sentAt             DateTime?      @map("sent_at")
+  providerMessageId  String?        @map("provider_message_id")
+  errorMessage       String?        @map("error_message")
+  retryCount         Int            @default(0) @map("retry_count")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+
+  events             EmailEvent[]
+
+  @@map("email_jobs")
+}
+
+model GmailToken {
+  id           String   @id @default(uuid())
+  userId       String   @unique @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken  String   @map("access_token")
+  refreshToken String   @map("refresh_token")
+  expiryDate   BigInt   @map("expiry_date")
+  email        String
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("gmail_tokens")
+}
+
+model EmailEvent {
+  id          String         @id @default(uuid())
+  emailJobId  String         @map("email_job_id")
+  emailJob    EmailJob       @relation(fields: [emailJobId], references: [id], onDelete: Cascade)
+  eventType   EmailEventType @map("event_type")
+  metadata    Json?          @db.JsonB
+  occurredAt  DateTime       @default(now()) @map("occurred_at")
+
+  @@map("email_events")
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+enum CsvImportStatus {
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  DONE
+  CANCELLED
+}
+
+enum EmailJobStatus {
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum EmailEventType {
+  DELIVERED
+  OPENED
+  CLICKED
+  BOUNCED
+  COMPLAINED
+}

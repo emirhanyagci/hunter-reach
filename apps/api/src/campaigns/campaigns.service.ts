@@ -34,7 +34,12 @@ export class CampaignsService {
       where: { id, userId },
       include: {
         template: { include: { category: true } },
-        campaignContacts: { include: { contact: true } },
+        campaignContacts: {
+          include: {
+            contact: true,
+            assignedTemplate: { select: { id: true, name: true } },
+          },
+        },
         _count: { select: { emailJobs: true } },
       },
     });
@@ -49,7 +54,6 @@ export class CampaignsService {
       select: { id: true, firstName: true },
     });
 
-    // Build unique-name → [contactId] map for efficient batching
     const nameToContactIds = new Map<string, string[]>();
     for (const c of contacts) {
       const name = c.firstName?.trim().toLowerCase();
@@ -62,7 +66,6 @@ export class CampaignsService {
     const uniqueNames = [...nameToContactIds.keys()];
     const genderByName = new Map<string, { gender: 'male' | 'female'; probability: number }>();
 
-    // Call genderize.io in batches
     for (let i = 0; i < uniqueNames.length; i += GENDERIZE_BATCH_SIZE) {
       const batch = uniqueNames.slice(i, i + GENDERIZE_BATCH_SIZE);
       try {
@@ -109,8 +112,12 @@ export class CampaignsService {
 
   // ── Campaign creation ────────────────────────────────────────────────────────
   async create(userId: string, dto: CreateCampaignDto) {
-    const template = await this.prisma.template.findFirst({ where: { id: dto.templateId, userId } });
-    if (!template) throw new NotFoundException('Template not found');
+    const isRoutingMode = !!(dto.contactTemplateAssignments?.length);
+
+    // In single-template mode, templateId is required
+    if (!isRoutingMode && !dto.templateId) {
+      throw new BadRequestException('templateId is required when not using routing mode');
+    }
 
     if (!dto.contactIds?.length) throw new BadRequestException('At least one contact is required');
 
@@ -129,12 +136,38 @@ export class CampaignsService {
 
     const contactGenders: Record<string, 'male' | 'female'> = dto.contactGenders ?? {};
 
-    // Create campaign with gender stored on each CampaignContact row
+    // Build per-contact template assignment map
+    const assignmentMap = new Map<string, { templateId: string; routingSource: string }>();
+    if (isRoutingMode) {
+      for (const a of dto.contactTemplateAssignments!) {
+        assignmentMap.set(a.contactId, { templateId: a.templateId, routingSource: a.routingSource });
+      }
+    }
+
+    // Collect all template IDs we need to fetch
+    const templateIdsNeeded = new Set<string>();
+    if (dto.templateId) templateIdsNeeded.add(dto.templateId);
+    for (const a of dto.contactTemplateAssignments ?? []) {
+      if (a.templateId) templateIdsNeeded.add(a.templateId);
+    }
+
+    const templateList = await this.prisma.template.findMany({
+      where: { id: { in: [...templateIdsNeeded] }, userId },
+    });
+    const templateById = new Map(templateList.map((t) => [t.id, t]));
+
+    // Validate default template
+    const defaultTemplate = dto.templateId ? templateById.get(dto.templateId) : null;
+    if (!isRoutingMode && !defaultTemplate) {
+      throw new NotFoundException('Template not found');
+    }
+
+    // Create campaign; templateId is the default/fallback
     const campaign = await this.prisma.campaign.create({
       data: {
         userId,
         name: dto.name,
-        templateId: dto.templateId,
+        templateId: dto.templateId ?? null,
         scheduledAt,
         timezone,
         customSubject: dto.customSubject || null,
@@ -142,22 +175,35 @@ export class CampaignsService {
         customBodyText: dto.customBodyText || null,
         status: dto.scheduledAt ? 'SCHEDULED' : 'SENDING',
         campaignContacts: {
-          create: contacts.map((c) => ({
-            contactId: c.id,
-            gender: contactGenders[c.id] ?? null,
-          })),
+          create: contacts.map((c) => {
+            const assignment = assignmentMap.get(c.id);
+            return {
+              contactId: c.id,
+              gender: contactGenders[c.id] ?? null,
+              assignedTemplateId: assignment?.templateId ?? dto.templateId ?? null,
+              routingSource: assignment?.routingSource ?? (dto.templateId ? 'auto' : null),
+            };
+          }),
         },
       },
     });
 
-    // Default effective content (used for unknown-gender contacts or when no variant exists)
-    const defaultSubject = dto.customSubject || template.subject;
-    const defaultBodyHtml = dto.customBodyHtml || template.bodyHtml;
-    const defaultBodyText = dto.customBodyText || template.bodyText;
-
-    // Pre-render and create email jobs using the correct gender variant
+    // Pre-render and create email jobs
     const emailJobsData = contacts.map((contact) => {
+      const assignment = assignmentMap.get(contact.id);
+      const resolvedTemplateId = assignment?.templateId ?? dto.templateId;
+      const template = resolvedTemplateId ? templateById.get(resolvedTemplateId) : null;
+
+      if (!template) {
+        // Contact has no template assigned — skip (shouldn't happen if frontend validates)
+        this.logger.warn(`Contact ${contact.id} has no template assigned, skipping email job`);
+        return null;
+      }
+
       const gender = contactGenders[contact.id];
+      const defaultSubject = dto.customSubject || template.subject;
+      const defaultBodyHtml = dto.customBodyHtml || template.bodyHtml;
+      const defaultBodyText = dto.customBodyText || template.bodyText;
 
       let subject = defaultSubject;
       let bodyHtml = defaultBodyHtml;
@@ -193,7 +239,7 @@ export class CampaignsService {
         scheduledAt,
         status: 'SCHEDULED' as const,
       };
-    });
+    }).filter((j): j is NonNullable<typeof j> => j !== null);
 
     await this.prisma.emailJob.createMany({ data: emailJobsData });
 

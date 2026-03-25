@@ -1,8 +1,8 @@
-import { Controller, Get, Patch, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ContactsService } from './contacts.service';
-import { ContactsFilterDto } from './contacts.dto';
+import { ContactsFilterDto, CreateContactDto, UpdateContactDto } from './contacts.dto';
 
 @ApiTags('contacts')
 @ApiBearerAuth()
@@ -21,14 +21,19 @@ export class ContactsController {
     return this.contactsService.getStats(req.user.sub);
   }
 
+  @Post()
+  create(@Body() dto: CreateContactDto, @Request() req) {
+    return this.contactsService.create(req.user.sub, dto);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string, @Request() req) {
     return this.contactsService.findOne(id, req.user.sub);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() body: any, @Request() req) {
-    return this.contactsService.update(id, req.user.sub, body);
+  update(@Param('id') id: string, @Body() dto: UpdateContactDto, @Request() req) {
+    return this.contactsService.update(id, req.user.sub, dto);
   }
 
   @Delete('bulk')

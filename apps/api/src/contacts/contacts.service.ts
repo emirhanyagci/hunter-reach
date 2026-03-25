@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ContactsFilterDto } from './contacts.dto';
+import { ContactsFilterDto, CreateContactDto, UpdateContactDto } from './contacts.dto';
 
 @Injectable()
 export class ContactsService {
@@ -27,23 +27,94 @@ export class ContactsService {
       ];
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.contact.findMany({ where, skip, take: limit, orderBy: { createdAt: 'desc' } }),
+    const [contacts, total] = await Promise.all([
+      this.prisma.contact.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          emailJobs: {
+            select: { status: true, replyCount: true, sentAt: true, scheduledAt: true },
+            orderBy: { createdAt: 'desc' },
+          },
+        },
+      }),
       this.prisma.contact.count({ where }),
     ]);
+
+    const data = contacts.map((c) => {
+      const jobs = c.emailJobs ?? [];
+      const hasReplied = jobs.some((j) => j.replyCount > 0 || j.status === 'REPLIED');
+      const hasSent = jobs.some((j) => j.status === 'SENT' || j.status === 'REPLIED');
+      const hasScheduled = jobs.some((j) => j.status === 'SCHEDULED');
+
+      let emailStatus: 'never_contacted' | 'scheduled' | 'sent' | 'replied' = 'never_contacted';
+      if (hasReplied) emailStatus = 'replied';
+      else if (hasSent) emailStatus = 'sent';
+      else if (hasScheduled) emailStatus = 'scheduled';
+
+      const lastJob = jobs[0];
+      return {
+        ...c,
+        emailStatus,
+        lastEmailSentAt: lastJob?.sentAt ?? null,
+        emailJobCount: jobs.length,
+      };
+    });
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   async findOne(id: string, userId: string) {
-    const contact = await this.prisma.contact.findFirst({ where: { id, userId } });
+    const contact = await this.prisma.contact.findFirst({
+      where: { id, userId },
+      include: {
+        emailJobs: {
+          include: {
+            campaign: { select: { id: true, name: true } },
+            template: { select: { id: true, name: true } },
+            events: { orderBy: { occurredAt: 'desc' } },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
     if (!contact) throw new NotFoundException('Contact not found');
-    return contact;
+
+    const jobs = contact.emailJobs ?? [];
+    const hasReplied = jobs.some((j) => j.replyCount > 0 || j.status === 'REPLIED');
+    const hasSent = jobs.some((j) => j.status === 'SENT' || j.status === 'REPLIED');
+    const hasScheduled = jobs.some((j) => j.status === 'SCHEDULED');
+
+    let emailStatus: 'never_contacted' | 'scheduled' | 'sent' | 'replied' = 'never_contacted';
+    if (hasReplied) emailStatus = 'replied';
+    else if (hasSent) emailStatus = 'sent';
+    else if (hasScheduled) emailStatus = 'scheduled';
+
+    return { ...contact, emailStatus };
   }
 
-  async update(id: string, userId: string, data: Partial<{ tags: string[]; firstName: string; company: string }>) {
+  async create(userId: string, dto: CreateContactDto) {
+    return this.prisma.contact.create({
+      data: {
+        userId,
+        email: dto.email,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        company: dto.company,
+        jobTitle: dto.jobTitle,
+        linkedin: dto.linkedin,
+        phoneNumber: dto.phoneNumber,
+        tags: dto.tags ?? [],
+        isValid: true,
+      } as any,
+    });
+  }
+
+  async update(id: string, userId: string, dto: UpdateContactDto) {
     await this.findOne(id, userId);
-    return this.prisma.contact.update({ where: { id }, data });
+    return this.prisma.contact.update({ where: { id }, data: dto });
   }
 
   async remove(id: string, userId: string) {

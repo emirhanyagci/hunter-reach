@@ -15,11 +15,12 @@ model User {
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
 
-  csvImports   CsvImport[]
-  contacts     Contact[]
-  templates    Template[]
-  campaigns    Campaign[]
-  gmailToken   GmailToken?
+  csvImports    CsvImport[]
+  contacts      Contact[]
+  templates     Template[]
+  campaigns     Campaign[]
+  gmailToken    GmailToken?
+  routingRules  RoutingRule[]
 
   @@map("users")
 }
@@ -40,27 +41,28 @@ model CsvImport {
 }
 
 model Contact {
-  id                 String    @id @default(uuid())
-  importId           String    @map("import_id")
-  import             CsvImport @relation(fields: [importId], references: [id], onDelete: Cascade)
-  userId             String    @map("user_id")
-  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                 String     @id @default(uuid())
+  importId           String?    @map("import_id")
+  import             CsvImport? @relation(fields: [importId], references: [id], onDelete: SetNull)
+  userId             String     @map("user_id")
+  user               User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   email              String
-  firstName          String?   @map("first_name")
-  lastName           String?   @map("last_name")
+  firstName          String?    @map("first_name")
+  lastName           String?    @map("last_name")
   company            String?
   domain             String?
-  jobTitle           String?   @map("job_title")
+  jobTitle           String?    @map("job_title")
+  gender             String?
   score              Int?
-  verificationStatus String?   @map("verification_status")
-  phoneNumber        String?   @map("phone_number")
+  verificationStatus String?    @map("verification_status")
+  phoneNumber        String?    @map("phone_number")
   twitter            String?
   linkedin           String?
-  extraFields        Json?     @map("extra_fields") @db.JsonB
-  isValid            Boolean   @default(true) @map("is_valid")
-  validationErrors   String[]  @map("validation_errors")
-  tags               String[]  @default([])
-  createdAt          DateTime  @default(now()) @map("created_at")
+  extraFields        Json?      @map("extra_fields") @db.JsonB
+  isValid            Boolean    @default(true) @map("is_valid")
+  validationErrors   String[]   @map("validation_errors")
+  tags               String[]   @default([])
+  createdAt          DateTime   @default(now()) @map("created_at")
 
   campaignContacts   CampaignContact[]
   emailJobs          EmailJob[]
@@ -99,9 +101,11 @@ model Template {
   createdAt      DateTime             @default(now()) @map("created_at")
   updatedAt      DateTime             @updatedAt @map("updated_at")
 
-  campaigns   Campaign[]
-  emailJobs   EmailJob[]
-  attachments TemplateAttachment[]
+  campaigns           Campaign[]
+  emailJobs           EmailJob[]
+  attachments         TemplateAttachment[]
+  routingRules        RoutingRule[]
+  assignedContacts    CampaignContact[]
 
   @@map("templates")
 }
@@ -143,15 +147,33 @@ model Campaign {
 }
 
 model CampaignContact {
-  id         String   @id @default(uuid())
-  campaignId String   @map("campaign_id")
-  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  contactId  String   @map("contact_id")
-  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  gender     String?  // 'male' | 'female' — assigned during campaign creation
+  id                 String    @id @default(uuid())
+  campaignId         String    @map("campaign_id")
+  campaign           Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId          String    @map("contact_id")
+  contact            Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  gender             String?   // 'male' | 'female' — assigned during campaign creation
+  assignedTemplateId String?   @map("assigned_template_id")
+  assignedTemplate   Template? @relation(fields: [assignedTemplateId], references: [id], onDelete: SetNull)
+  routingSource      String?   @map("routing_source") // 'auto' | 'manual' | 'unmatched'
 
   @@unique([campaignId, contactId])
   @@map("campaign_contacts")
+}
+
+model RoutingRule {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryName String    @map("category_name")
+  keywords     String[]
+  templateId   String?   @map("template_id")
+  template     Template? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  priority     Int       @default(0)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("routing_rules")
 }
 
 model EmailJob {
@@ -169,8 +191,15 @@ model EmailJob {
   scheduledAt        DateTime       @map("scheduled_at")
   sentAt             DateTime?      @map("sent_at")
   providerMessageId  String?        @map("provider_message_id")
+  threadId           String?        @map("thread_id")
+  replyCount         Int            @default(0) @map("reply_count")
+  lastRepliedAt      DateTime?      @map("last_replied_at")
   errorMessage       String?        @map("error_message")
   retryCount         Int            @default(0) @map("retry_count")
+  isReminder         Boolean        @default(false) @map("is_reminder")
+  parentJobId        String?        @map("parent_job_id")
+  parentJob          EmailJob?      @relation("ReminderChain", fields: [parentJobId], references: [id], onDelete: SetNull)
+  reminders          EmailJob[]     @relation("ReminderChain")
   createdAt          DateTime       @default(now()) @map("created_at")
   updatedAt          DateTime       @updatedAt @map("updated_at")
 
@@ -225,6 +254,7 @@ enum EmailJobStatus {
   SENT
   FAILED
   CANCELLED
+  REPLIED
 }
 
 enum EmailEventType {
@@ -233,4 +263,5 @@ enum EmailEventType {
   CLICKED
   BOUNCED
   COMPLAINED
+  REPLIED
 }

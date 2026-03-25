@@ -12,6 +12,7 @@ import { EmailModule } from './email/email.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { GmailAuthModule } from './gmail-auth/gmail-auth.module';
+import { RoutingRulesModule } from './routing-rules/routing-rules.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { GmailAuthModule } from './gmail-auth/gmail-auth.module';
     SchedulerModule,
     WebhooksModule,
     GmailAuthModule,
+    RoutingRulesModule,
   ],
 })
 export class AppModule {}

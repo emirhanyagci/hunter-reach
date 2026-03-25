@@ -1,8 +1,8 @@
 'use client';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
-import { contactsApi, templatesApi, campaignsApi } from '@/lib/api';
+import { contactsApi, templatesApi, campaignsApi, routingRulesApi } from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -17,9 +17,11 @@ import {
 import {
   Users, Calendar, Send, Loader2, ChevronRight, ChevronLeft,
   Search, CheckCircle2, AlertCircle, Briefcase, Clock, Zap, Tag,
-  HelpCircle, SkipForward, Linkedin, Plus,
+  HelpCircle, SkipForward, Linkedin, Plus, GitBranch,
+  FileText, RefreshCw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import Link from 'next/link';
 
 function GenderMale({ className }: { className?: string }) {
   return <span className={cn('font-bold leading-none', className)}>♂</span>;
@@ -39,6 +41,20 @@ interface ContactGenderState {
   autoAssigned: boolean;
   assignedGender: 'male' | 'female' | null;
 }
+
+interface RoutingAssignment {
+  contactId: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  jobTitle: string | null;
+  assignedTemplateId: string | null;
+  assignedTemplateName: string | null;
+  matchedCategory: string | null;
+  routingSource: 'auto' | 'manual' | 'unmatched';
+}
+
+type CampaignMode = 'single' | 'routing';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getNextBusinessDay(): string {
@@ -64,7 +80,21 @@ function confidenceBadge(probability: number) {
   );
 }
 
-const STEPS = ['Recipients', 'Gender Detection', 'Template & Schedule', 'Review'];
+const CATEGORY_COLORS: Record<string, string> = {
+  Executive: 'bg-purple-100 text-purple-700 border-purple-200',
+  Technical: 'bg-blue-100 text-blue-700 border-blue-200',
+  HR: 'bg-green-100 text-green-700 border-green-200',
+  Sales: 'bg-orange-100 text-orange-700 border-orange-200',
+  Marketing: 'bg-pink-100 text-pink-700 border-pink-200',
+};
+
+function getCategoryColor(name: string | null) {
+  if (!name) return 'bg-muted text-muted-foreground border-border';
+  return CATEGORY_COLORS[name] ?? 'bg-muted text-muted-foreground border-border';
+}
+
+const SINGLE_STEPS = ['Recipients', 'Gender Detection', 'Template & Schedule', 'Review'];
+const ROUTING_STEPS = ['Recipients', 'Gender Detection', 'Template Routing', 'Review'];
 
 const TIMEZONES = [
   'UTC', 'Europe/Istanbul', 'America/New_York', 'America/Chicago',
@@ -72,7 +102,6 @@ const TIMEZONES = [
   'Europe/Berlin', 'Asia/Dubai', 'Asia/Tokyo', 'Australia/Sydney',
 ];
 
-// ── Page ───────────────────────────────────────────────────────────────────────
 const emptyCustomForm: EmailEditorValue = {
   name: '', categoryId: '', subject: '', bodyText: '', bodyHtml: '',
   maleSubject: '', maleBodyText: '', maleBodyHtml: '',
@@ -80,10 +109,14 @@ const emptyCustomForm: EmailEditorValue = {
   attachments: [], pendingFiles: [],
 };
 
+// ── Page ───────────────────────────────────────────────────────────────────────
 export default function NewCampaignPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
+
+  // Campaign mode
+  const [campaignMode, setCampaignMode] = useState<CampaignMode>('routing');
 
   // Step 0 — Recipients
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -98,11 +131,16 @@ export default function NewCampaignPage() {
   const [genderSkipped, setGenderSkipped] = useState(false);
   const [genderError, setGenderError] = useState<string | null>(null);
 
-  // Step 2 — Template & Schedule
+  // Step 2 — Template & Schedule (single mode) / Routing (routing mode)
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
-  const [campaignName, setCampaignName] = useState('');
   const [scheduledAt, setScheduledAt] = useState('');
   const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+
+  // Routing mode state
+  const [routingAssignments, setRoutingAssignments] = useState<RoutingAssignment[]>([]);
+  const [routingPreviewDone, setRoutingPreviewDone] = useState(false);
+  const [routingLoading, setRoutingLoading] = useState(false);
+  const [fallbackTemplateId, setFallbackTemplateId] = useState('');
 
   // Custom template dialog
   const [showCustomDialog, setShowCustomDialog] = useState(false);
@@ -123,6 +161,11 @@ export default function NewCampaignPage() {
   const { data: categories } = useQuery({
     queryKey: ['template-categories'],
     queryFn: templatesApi.getCategories,
+  });
+
+  const { data: routingRules = [] } = useQuery({
+    queryKey: ['routing-rules'],
+    queryFn: routingRulesApi.getAll,
   });
 
   const sendMutation = useMutation({
@@ -154,7 +197,6 @@ export default function NewCampaignPage() {
     onSuccess: (saved: any) => {
       queryClient.invalidateQueries({ queryKey: ['templates-campaign'] });
       setSelectedTemplateId(saved.id);
-      if (!campaignName) setCampaignName(saved.name);
       setShowCustomDialog(false);
       setCustomBaseId('');
       setCustomForm(emptyCustomForm);
@@ -162,6 +204,18 @@ export default function NewCampaignPage() {
   });
 
   const contacts = contactsData?.data || [];
+
+  const campaignName = useMemo(() => {
+    const selectedContacts = contacts.filter((c: any) => selectedIds.has(c.id));
+    const companies = [...new Set(selectedContacts.map((c: any) => c.company).filter(Boolean))] as string[];
+    if (companies.length === 1) return companies[0];
+    if (companies.length > 1) return companies.slice(0, 2).join(', ') + (companies.length > 2 ? ` +${companies.length - 2}` : '');
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const d = new Date();
+    return `Campaign — ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }, [contacts, selectedIds]);
+
+  const STEPS = campaignMode === 'routing' ? ROUTING_STEPS : SINGLE_STEPS;
 
   // ── Gender detection ────────────────────────────────────────────────────────
   const runGenderDetection = useCallback(async () => {
@@ -171,9 +225,7 @@ export default function NewCampaignPage() {
     try {
       const contactIds = [...selectedIds];
       const results: any[] = await campaignsApi.detectGenders(contactIds);
-
       const contactMap = new Map(contacts.map((c: any) => [c.id, c]));
-
       const states: ContactGenderState[] = results.map((r) => {
         const contact = contactMap.get(r.contactId);
         return {
@@ -187,12 +239,10 @@ export default function NewCampaignPage() {
           assignedGender: r.autoAssigned ? r.gender : null,
         };
       });
-
       setGenderStates(states);
       setGenderDetected(true);
     } catch {
       setGenderError('Could not reach the gender detection service. Please assign genders manually or skip.');
-      // Populate states so user can assign manually
       const states: ContactGenderState[] = [...selectedIds].map((id) => {
         const contact = contacts.find((c: any) => c.id === id);
         return {
@@ -219,19 +269,52 @@ export default function NewCampaignPage() {
     }
   }, [step, genderDetected, genderSkipped, genderDetecting, runGenderDetection]);
 
+  // ── Routing preview ──────────────────────────────────────────────────────────
+  const runRoutingPreview = useCallback(async () => {
+    setRoutingLoading(true);
+    try {
+      const assignments: RoutingAssignment[] = await routingRulesApi.previewRouting(
+        [...selectedIds],
+        fallbackTemplateId || undefined,
+      );
+      setRoutingAssignments(assignments);
+      setRoutingPreviewDone(true);
+    } finally {
+      setRoutingLoading(false);
+    }
+  }, [selectedIds, fallbackTemplateId]);
+
+  useEffect(() => {
+    if (step === 2 && campaignMode === 'routing' && !routingPreviewDone && !routingLoading) {
+      runRoutingPreview();
+    }
+  }, [step, campaignMode, routingPreviewDone, routingLoading, runRoutingPreview]);
+
   const setContactGender = (contactId: string, gender: 'male' | 'female') => {
     setGenderStates((prev) =>
       prev.map((s) => s.contactId === contactId ? { ...s, assignedGender: gender } : s),
     );
   };
 
+  const setAssignmentTemplate = (contactId: string, templateId: string) => {
+    const t = templates.find((t: any) => t.id === templateId);
+    setRoutingAssignments((prev) =>
+      prev.map((a) =>
+        a.contactId === contactId
+          ? { ...a, assignedTemplateId: templateId, assignedTemplateName: t?.name ?? null, routingSource: 'manual' }
+          : a,
+      ),
+    );
+  };
+
   const pendingGenderCount = genderStates.filter((s) => !s.assignedGender).length;
   const autoAssignedCount = genderStates.filter((s) => s.autoAssigned).length;
+  const genderDetectionComplete = genderSkipped || (genderDetected && pendingGenderCount === 0);
 
-  const genderDetectionComplete =
-    genderSkipped || (genderDetected && pendingGenderCount === 0);
+  const unmatchedCount = routingAssignments.filter((a) => a.routingSource === 'unmatched').length;
+  const routingComplete = routingPreviewDone && unmatchedCount === 0;
 
-  // ── Template selection ───────────────────────────────────────────────────────
+  // ── Contact selection ────────────────────────────────────────────────────────
   const toggleContact = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -247,16 +330,11 @@ export default function NewCampaignPage() {
 
   const handleTemplateSelect = (templateId: string) => {
     setSelectedTemplateId(templateId);
-    const t = templates.find((t: any) => t.id === templateId);
-    if (t && !campaignName) setCampaignName(t.name);
   };
 
   const handleCustomBaseChange = (templateId: string) => {
     setCustomBaseId(templateId);
-    if (!templateId) {
-      setCustomForm(emptyCustomForm);
-      return;
-    }
+    if (!templateId) { setCustomForm(emptyCustomForm); return; }
     const t = templates.find((t: any) => t.id === templateId);
     if (t) {
       setCustomForm({
@@ -288,29 +366,56 @@ export default function NewCampaignPage() {
       }
     }
 
-    sendMutation.mutate({
-      name: campaignName,
-      templateId: selectedTemplateId,
-      contactIds: [...selectedIds],
-      scheduledAt: scheduledAt || undefined,
-      timezone,
-      contactGenders,
-    });
+    if (campaignMode === 'routing') {
+      sendMutation.mutate({
+        name: campaignName,
+        templateId: fallbackTemplateId || undefined,
+        contactIds: [...selectedIds],
+        scheduledAt: scheduledAt || undefined,
+        timezone,
+        contactGenders,
+        contactTemplateAssignments: routingAssignments
+          .filter((a) => a.assignedTemplateId)
+          .map((a) => ({
+            contactId: a.contactId,
+            templateId: a.assignedTemplateId!,
+            routingSource: a.routingSource,
+          })),
+      });
+    } else {
+      sendMutation.mutate({
+        name: campaignName,
+        templateId: selectedTemplateId,
+        contactIds: [...selectedIds],
+        scheduledAt: scheduledAt || undefined,
+        timezone,
+        contactGenders,
+      });
+    }
   };
 
   const canProceed = [
     selectedIds.size > 0,
     genderDetectionComplete,
-    !!selectedTemplateId && !!campaignName,
+    campaignMode === 'routing'
+      ? routingComplete
+      : !!selectedTemplateId,
     true,
   ];
 
-  // Gender summary for review
   const maleCount = genderStates.filter((s) => s.assignedGender === 'male').length;
   const femaleCount = genderStates.filter((s) => s.assignedGender === 'female').length;
   const unknownCount = genderSkipped
     ? selectedIds.size
     : genderStates.filter((s) => !s.assignedGender).length;
+
+  // Routing summary for review
+  const routingByTemplate = routingAssignments.reduce<Record<string, { name: string; count: number; category: string | null }>>((acc, a) => {
+    const key = a.assignedTemplateId ?? '__unmatched__';
+    if (!acc[key]) acc[key] = { name: a.assignedTemplateName ?? 'No template', count: 0, category: a.matchedCategory };
+    acc[key].count++;
+    return acc;
+  }, {});
 
   return (
     <div className="space-y-6">
@@ -318,6 +423,55 @@ export default function NewCampaignPage() {
         title="New Campaign"
         description="Send personalised outreach emails to your selected contacts"
       />
+
+      {/* Mode selector (shown only on step 0) */}
+      {step === 0 && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button
+            onClick={() => setCampaignMode('routing')}
+            className={cn(
+              'flex items-start gap-3 rounded-xl border p-4 text-left transition-all hover:shadow-sm',
+              campaignMode === 'routing' ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
+            )}
+          >
+            <div className={cn('rounded-lg p-2 shrink-0', campaignMode === 'routing' ? 'bg-primary/10' : 'bg-muted')}>
+              <GitBranch className={cn('h-5 w-5', campaignMode === 'routing' ? 'text-primary' : 'text-muted-foreground')} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-semibold">Smart Routing</p>
+                {campaignMode === 'routing' && <CheckCircle2 className="h-4 w-4 text-primary" />}
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">Recommended</span>
+              </div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Automatically assign different templates to different contacts based on their job title.
+                Great when your list has a mix of executives, technical people, and HR.
+              </p>
+            </div>
+          </button>
+
+          <button
+            onClick={() => setCampaignMode('single')}
+            className={cn(
+              'flex items-start gap-3 rounded-xl border p-4 text-left transition-all hover:shadow-sm',
+              campaignMode === 'single' ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
+            )}
+          >
+            <div className={cn('rounded-lg p-2 shrink-0', campaignMode === 'single' ? 'bg-primary/10' : 'bg-muted')}>
+              <FileText className={cn('h-5 w-5', campaignMode === 'single' ? 'text-primary' : 'text-muted-foreground')} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-semibold">Single Template</p>
+                {campaignMode === 'single' && <CheckCircle2 className="h-4 w-4 text-primary" />}
+              </div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Everyone in this campaign gets the same template (with optional male/female variants).
+              </p>
+            </div>
+          </button>
+        </div>
+      )}
 
       {/* Step indicator */}
       <div className="flex items-center gap-2 flex-wrap">
@@ -467,7 +621,6 @@ export default function NewCampaignPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Loading state */}
               {genderDetecting && (
                 <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -476,7 +629,6 @@ export default function NewCampaignPage() {
                 </div>
               )}
 
-              {/* Error banner */}
               {genderError && (
                 <div className="flex items-start gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -484,10 +636,8 @@ export default function NewCampaignPage() {
                 </div>
               )}
 
-              {/* Detection results */}
               {genderDetected && !genderSkipped && (
                 <>
-                  {/* Summary bar */}
                   <div className="grid grid-cols-3 gap-3">
                     <div className="rounded-xl border bg-green-50 p-3 text-center">
                       <p className="text-xl font-bold text-green-700">{autoAssignedCount}</p>
@@ -505,7 +655,6 @@ export default function NewCampaignPage() {
                     </div>
                   </div>
 
-                  {/* Contacts needing manual input */}
                   {pendingGenderCount > 0 && (
                     <div>
                       <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold text-yellow-700">
@@ -522,68 +671,54 @@ export default function NewCampaignPage() {
                             </tr>
                           </thead>
                           <tbody className="divide-y">
-                            {genderStates
-                              .filter((s) => !s.assignedGender)
-                              .map((s) => (
-                                <tr key={s.contactId} className="bg-yellow-50/30">
-                                  <td className="p-3">
-                                    <p className="font-medium">{s.firstName || '(no name)'}</p>
-                                    <p className="text-xs text-muted-foreground">{s.email}</p>
-                                    {s.linkedin && (
-                                      <a
-                                        href={s.linkedin}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="mt-0.5 inline-flex items-center gap-1 text-xs text-[#0077b5] hover:underline"
-                                        onClick={(e) => e.stopPropagation()}
-                                      >
-                                        <Linkedin className="h-3 w-3" />
-                                        LinkedIn
-                                      </a>
-                                    )}
-                                  </td>
-                                  <td className="p-3">
-                                    {s.detectedGender ? (
-                                      <div className="flex items-center gap-1.5">
-                                        {s.detectedGender === 'male'
-                                          ? <GenderMale className="h-3.5 w-3.5 text-blue-500" />
-                                          : <GenderFemale className="h-3.5 w-3.5 text-pink-500" />}
-                                        <span className="capitalize text-xs">{s.detectedGender}</span>
-                                        {confidenceBadge(s.probability)}
-                                      </div>
-                                    ) : (
-                                      <span className="text-xs text-muted-foreground italic">
-                                        {s.firstName ? 'Not found' : 'No first name'}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="p-3">
-                                    <div className="flex gap-1.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setContactGender(s.contactId, 'male')}
-                                        className="flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
-                                      >
-                                        <GenderMale className="h-3 w-3" /> Male
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setContactGender(s.contactId, 'female')}
-                                        className="flex items-center gap-1 rounded-lg border border-pink-200 bg-pink-50 px-2.5 py-1.5 text-xs font-medium text-pink-700 transition-colors hover:bg-pink-100"
-                                      >
-                                        <GenderFemale className="h-3 w-3" /> Female
-                                      </button>
+                            {genderStates.filter((s) => !s.assignedGender).map((s) => (
+                              <tr key={s.contactId} className="bg-yellow-50/30">
+                                <td className="p-3">
+                                  <p className="font-medium">{s.firstName || '(no name)'}</p>
+                                  <p className="text-xs text-muted-foreground">{s.email}</p>
+                                  {s.linkedin && (
+                                    <a href={s.linkedin} target="_blank" rel="noopener noreferrer"
+                                      className="mt-0.5 inline-flex items-center gap-1 text-xs text-[#0077b5] hover:underline"
+                                      onClick={(e) => e.stopPropagation()}>
+                                      <Linkedin className="h-3 w-3" /> LinkedIn
+                                    </a>
+                                  )}
+                                </td>
+                                <td className="p-3">
+                                  {s.detectedGender ? (
+                                    <div className="flex items-center gap-1.5">
+                                      {s.detectedGender === 'male'
+                                        ? <GenderMale className="h-3.5 w-3.5 text-blue-500" />
+                                        : <GenderFemale className="h-3.5 w-3.5 text-pink-500" />}
+                                      <span className="capitalize text-xs">{s.detectedGender}</span>
+                                      {confidenceBadge(s.probability)}
                                     </div>
-                                  </td>
-                                </tr>
-                              ))}
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground italic">
+                                      {s.firstName ? 'Not found' : 'No first name'}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3">
+                                  <div className="flex gap-1.5">
+                                    <button type="button" onClick={() => setContactGender(s.contactId, 'male')}
+                                      className="flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100">
+                                      <GenderMale className="h-3 w-3" /> Male
+                                    </button>
+                                    <button type="button" onClick={() => setContactGender(s.contactId, 'female')}
+                                      className="flex items-center gap-1 rounded-lg border border-pink-200 bg-pink-50 px-2.5 py-1.5 text-xs font-medium text-pink-700 transition-colors hover:bg-pink-100">
+                                      <GenderFemale className="h-3 w-3" /> Female
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
                           </tbody>
                         </table>
                       </div>
                     </div>
                   )}
 
-                  {/* Auto-assigned contacts (collapsible summary) */}
                   {autoAssignedCount > 0 && (
                     <details className="group">
                       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm font-medium hover:bg-muted/50">
@@ -602,60 +737,38 @@ export default function NewCampaignPage() {
                             </tr>
                           </thead>
                           <tbody className="divide-y">
-                            {genderStates
-                              .filter((s) => s.autoAssigned)
-                              .map((s) => (
-                                <tr key={s.contactId}>
-                                  <td className="p-3">
-                                    <p className="font-medium">{s.firstName || '—'}</p>
-                                    <p className="text-xs text-muted-foreground">{s.email}</p>
-                                    {s.linkedin && (
-                                      <a
-                                        href={s.linkedin}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="mt-0.5 inline-flex items-center gap-1 text-xs text-[#0077b5] hover:underline"
-                                        onClick={(e) => e.stopPropagation()}
-                                      >
-                                        <Linkedin className="h-3 w-3" />
-                                        LinkedIn
-                                      </a>
-                                    )}
-                                  </td>
-                                  <td className="p-3">
-                                    <div className="flex items-center gap-1.5">
-                                      {s.assignedGender === 'male'
-                                        ? <GenderMale className="h-3.5 w-3.5 text-blue-500" />
-                                        : <GenderFemale className="h-3.5 w-3.5 text-pink-500" />}
-                                      <span className="capitalize text-xs font-medium">
-                                        {s.assignedGender}
-                                      </span>
-                                    </div>
-                                  </td>
-                                  <td className="p-3">{confidenceBadge(s.probability)}</td>
-                                  <td className="p-3">
-                                    <div className="flex gap-1">
-                                      {(['male', 'female'] as const).map((g) => (
-                                        <button
-                                          key={g}
-                                          type="button"
-                                          onClick={() => setContactGender(s.contactId, g)}
-                                          className={cn(
-                                            'rounded px-2 py-0.5 text-xs font-medium transition-colors',
-                                            s.assignedGender === g
-                                              ? g === 'male'
-                                                ? 'bg-blue-100 text-blue-700'
-                                                : 'bg-pink-100 text-pink-700'
-                                              : 'bg-muted text-muted-foreground hover:bg-muted/80',
-                                          )}
-                                        >
-                                          {g === 'male' ? '♂' : '♀'}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
+                            {genderStates.filter((s) => s.autoAssigned).map((s) => (
+                              <tr key={s.contactId}>
+                                <td className="p-3">
+                                  <p className="font-medium">{s.firstName || '—'}</p>
+                                  <p className="text-xs text-muted-foreground">{s.email}</p>
+                                </td>
+                                <td className="p-3">
+                                  <div className="flex items-center gap-1.5">
+                                    {s.assignedGender === 'male'
+                                      ? <GenderMale className="h-3.5 w-3.5 text-blue-500" />
+                                      : <GenderFemale className="h-3.5 w-3.5 text-pink-500" />}
+                                    <span className="capitalize text-xs font-medium">{s.assignedGender}</span>
+                                  </div>
+                                </td>
+                                <td className="p-3">{confidenceBadge(s.probability)}</td>
+                                <td className="p-3">
+                                  <div className="flex gap-1">
+                                    {(['male', 'female'] as const).map((g) => (
+                                      <button key={g} type="button" onClick={() => setContactGender(s.contactId, g)}
+                                        className={cn(
+                                          'rounded px-2 py-0.5 text-xs font-medium transition-colors',
+                                          s.assignedGender === g
+                                            ? g === 'male' ? 'bg-blue-100 text-blue-700' : 'bg-pink-100 text-pink-700'
+                                            : 'bg-muted text-muted-foreground hover:bg-muted/80',
+                                        )}>
+                                        {g === 'male' ? '♂' : '♀'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
                           </tbody>
                         </table>
                       </div>
@@ -664,20 +777,12 @@ export default function NewCampaignPage() {
                 </>
               )}
 
-              {/* Skipped state */}
               {genderSkipped && (
                 <div className="flex items-center gap-2 rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
                   <SkipForward className="h-4 w-4" />
                   Gender detection skipped — all contacts will receive the default template version.
-                  <button
-                    type="button"
-                    className="ml-auto text-primary hover:underline"
-                    onClick={() => {
-                      setGenderSkipped(false);
-                      setGenderDetected(false);
-                      setGenderStates([]);
-                    }}
-                  >
+                  <button type="button" className="ml-auto text-primary hover:underline"
+                    onClick={() => { setGenderSkipped(false); setGenderDetected(false); setGenderStates([]); }}>
                     Undo
                   </button>
                 </div>
@@ -685,7 +790,6 @@ export default function NewCampaignPage() {
             </CardContent>
           </Card>
 
-          {/* Skip option */}
           {!genderSkipped && genderDetected && (
             <div className="flex items-center justify-end gap-2 text-sm text-muted-foreground">
               <span>Want to use the default template for everyone?</span>
@@ -698,26 +802,277 @@ export default function NewCampaignPage() {
         </div>
       )}
 
-      {/* ── STEP 2: Template & Schedule ────────────────────────────────────── */}
-      {step === 2 && (
+      {/* ── STEP 2: Template Routing (routing mode) ─────────────────────────── */}
+      {step === 2 && campaignMode === 'routing' && (
         <div className="space-y-5">
-          {/* Campaign name */}
+          {/* Fallback template + re-run */}
           <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-4">
-                <div className="flex-1 space-y-1">
-                  <Label>Campaign name</Label>
-                  <Input
-                    value={campaignName}
-                    onChange={(e) => setCampaignName(e.target.value)}
-                    placeholder="e.g. CTO Outreach — March 2026"
-                  />
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <GitBranch className="h-4 w-4" />
+                Template Routing
+                {routingPreviewDone && (
+                  <Button variant="ghost" size="sm" className="ml-auto h-7 text-xs"
+                    onClick={() => { setRoutingPreviewDone(false); runRoutingPreview(); }}>
+                    <RefreshCw className="mr-1.5 h-3 w-3" /> Re-run routing
+                  </Button>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Fallback template */}
+              <div className="rounded-xl border bg-muted/30 p-4 space-y-3">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                  <div className="text-sm">
+                    <p className="font-medium">Fallback template</p>
+                    <p className="text-muted-foreground text-xs">
+                      Used for contacts that don't match any routing rule. You can also assign them manually below.
+                    </p>
+                  </div>
                 </div>
+                <Select
+                  value={fallbackTemplateId}
+                  onValueChange={(v) => {
+                    setFallbackTemplateId(v);
+                    setRoutingPreviewDone(false);
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select fallback template (optional)…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {templates.map((t: any) => (
+                      <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
+
+              {/* No routing rules warning */}
+              {(routingRules as any[]).length === 0 && (
+                <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm">
+                  <p className="font-medium text-yellow-800 mb-1">No routing rules configured</p>
+                  <p className="text-yellow-700 mb-3">
+                    You haven't set up any routing rules yet. Go to Routing Rules to define which job titles
+                    map to which templates.
+                  </p>
+                  <Link href="/dashboard/routing-rules" target="_blank">
+                    <Button variant="outline" size="sm">
+                      <GitBranch className="mr-1.5 h-3.5 w-3.5" />
+                      Manage Routing Rules
+                    </Button>
+                  </Link>
+                </div>
+              )}
+
+              {/* Loading */}
+              {routingLoading && (
+                <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                  <p className="text-sm font-medium">Running routing rules…</p>
+                  <p className="text-xs">Matching {selectedIds.size} contacts against your rules</p>
+                </div>
+              )}
+
+              {/* Results */}
+              {routingPreviewDone && !routingLoading && (
+                <>
+                  {/* Summary */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="rounded-xl border bg-green-50 p-3 text-center">
+                      <p className="text-xl font-bold text-green-700">
+                        {routingAssignments.filter((a) => a.routingSource === 'auto').length}
+                      </p>
+                      <p className="text-xs text-green-600 mt-0.5">Auto-matched</p>
+                    </div>
+                    <div className={cn('rounded-xl border p-3 text-center', unmatchedCount > 0 ? 'bg-yellow-50' : 'bg-muted/40')}>
+                      <p className={cn('text-xl font-bold', unmatchedCount > 0 ? 'text-yellow-700' : 'text-muted-foreground')}>
+                        {unmatchedCount}
+                      </p>
+                      <p className={cn('text-xs mt-0.5', unmatchedCount > 0 ? 'text-yellow-600' : 'text-muted-foreground')}>
+                        Needs manual assignment
+                      </p>
+                    </div>
+                    <div className="rounded-xl border bg-muted/40 p-3 text-center">
+                      <p className="text-xl font-bold">{routingAssignments.length}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">Total contacts</p>
+                    </div>
+                  </div>
+
+                  {/* Unmatched contacts */}
+                  {unmatchedCount > 0 && (
+                    <div>
+                      <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold text-yellow-700">
+                        <HelpCircle className="h-4 w-4" />
+                        Contacts needing manual template assignment ({unmatchedCount})
+                      </h4>
+                      <div className="overflow-hidden rounded-lg border">
+                        <table className="w-full text-sm">
+                          <thead className="border-b bg-muted/50">
+                            <tr>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Contact</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Job Title</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Assign Template</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y">
+                            {routingAssignments.filter((a) => a.routingSource === 'unmatched').map((a) => (
+                              <tr key={a.contactId} className="bg-yellow-50/30">
+                                <td className="p-3">
+                                  <p className="font-medium">{[a.firstName, a.lastName].filter(Boolean).join(' ') || '(no name)'}</p>
+                                  <p className="text-xs text-muted-foreground">{a.email}</p>
+                                </td>
+                                <td className="p-3 text-xs text-muted-foreground">{a.jobTitle || '—'}</td>
+                                <td className="p-3">
+                                  <Select
+                                    value={a.assignedTemplateId ?? ''}
+                                    onValueChange={(v) => setAssignmentTemplate(a.contactId, v)}
+                                  >
+                                    <SelectTrigger className="h-8 text-xs">
+                                      <SelectValue placeholder="Pick template…" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {templates.map((t: any) => (
+                                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Auto-matched contacts */}
+                  {routingAssignments.filter((a) => a.routingSource !== 'unmatched').length > 0 && (
+                    <details className="group">
+                      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm font-medium hover:bg-muted/50">
+                        <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        {routingAssignments.filter((a) => a.routingSource !== 'unmatched').length} contacts matched
+                        <ChevronRight className="ml-auto h-4 w-4 transition-transform group-open:rotate-90" />
+                      </summary>
+                      <div className="mt-2 overflow-hidden rounded-lg border">
+                        <table className="w-full text-sm">
+                          <thead className="border-b bg-muted/50">
+                            <tr>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Contact</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Job Title</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Category</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Assigned Template</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground">Override</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y">
+                            {routingAssignments.filter((a) => a.routingSource !== 'unmatched').map((a) => (
+                              <tr key={a.contactId}>
+                                <td className="p-3">
+                                  <p className="font-medium">{[a.firstName, a.lastName].filter(Boolean).join(' ') || '—'}</p>
+                                  <p className="text-xs text-muted-foreground">{a.email}</p>
+                                </td>
+                                <td className="p-3 text-xs text-muted-foreground">{a.jobTitle || '—'}</td>
+                                <td className="p-3">
+                                  {a.matchedCategory ? (
+                                    <span className={cn('rounded-full border px-2.5 py-0.5 text-xs font-medium', getCategoryColor(a.matchedCategory))}>
+                                      {a.matchedCategory}
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground italic">Fallback</span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-xs font-medium">{a.assignedTemplateName || '—'}</td>
+                                <td className="p-3">
+                                  <Select
+                                    value={a.assignedTemplateId ?? ''}
+                                    onValueChange={(v) => setAssignmentTemplate(a.contactId, v)}
+                                  >
+                                    <SelectTrigger className="h-7 text-xs w-36">
+                                      <SelectValue placeholder="Override…" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {templates.map((t: any) => (
+                                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                  )}
+                </>
+              )}
             </CardContent>
           </Card>
 
-          {/* Template selector */}
+          {/* Scheduling */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Calendar className="h-4 w-4" />
+                When to send
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <button onClick={() => setScheduledAt('')}
+                  className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                    !scheduledAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', !scheduledAt ? 'bg-primary/10' : 'bg-muted')}>
+                    <Zap className={cn('h-4 w-4', !scheduledAt ? 'text-primary' : 'text-muted-foreground')} />
+                  </div>
+                  <div><p className="text-sm font-semibold">Send now</p><p className="text-xs text-muted-foreground">Immediately</p></div>
+                </button>
+
+                <button onClick={() => setScheduledAt(getNextBusinessDay())}
+                  className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                    scheduledAt === getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', scheduledAt === getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
+                    <Clock className={cn('h-4 w-4', scheduledAt === getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
+                  </div>
+                  <div><p className="text-sm font-semibold">Next business day</p><p className="text-xs text-muted-foreground">8:30 AM</p></div>
+                </button>
+
+                <button onClick={() => { if (!scheduledAt || scheduledAt === getNextBusinessDay()) setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16)); }}
+                  className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                    scheduledAt && scheduledAt !== getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
+                    <Calendar className={cn('h-4 w-4', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
+                  </div>
+                  <div><p className="text-sm font-semibold">Custom time</p><p className="text-xs text-muted-foreground">Pick date & time</p></div>
+                </button>
+              </div>
+
+              {scheduledAt && (
+                <div className="grid grid-cols-1 gap-3 rounded-xl border bg-muted/30 p-4 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>Date & Time</Label>
+                    <Input type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)}
+                      min={new Date().toISOString().slice(0, 16)} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Timezone</Label>
+                    <Select value={timezone} onValueChange={setTimezone}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>{TIMEZONES.map((tz) => <SelectItem key={tz} value={tz}>{tz}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* ── STEP 2: Template & Schedule (single mode) ───────────────────────── */}
+      {step === 2 && campaignMode === 'single' && (
+        <div className="space-y-5">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Choose base template</CardTitle>
@@ -728,14 +1083,9 @@ export default function NewCampaignPage() {
                   const hasMale = !!(t.maleSubject || t.maleBodyHtml);
                   const hasFemale = !!(t.femaleSubject || t.femaleBodyHtml);
                   return (
-                    <button
-                      key={t.id}
-                      onClick={() => handleTemplateSelect(t.id)}
-                      className={cn(
-                        'rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                        selectedTemplateId === t.id ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
-                      )}
-                    >
+                    <button key={t.id} onClick={() => handleTemplateSelect(t.id)}
+                      className={cn('rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                        selectedTemplateId === t.id ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
                       <div className="flex items-start justify-between">
                         <div className="min-w-0">
                           <p className="truncate text-sm font-semibold">{t.name}</p>
@@ -746,27 +1096,16 @@ export default function NewCampaignPage() {
                       <p className="mt-1.5 truncate text-xs italic text-muted-foreground">"{t.subject}"</p>
                       {(hasMale || hasFemale) && (
                         <div className="mt-1.5 flex gap-1">
-                          {hasMale && (
-                            <span className="flex items-center gap-0.5 rounded-full bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600">
-                              <GenderMale className="h-2.5 w-2.5" /> Male
-                            </span>
-                          )}
-                          {hasFemale && (
-                            <span className="flex items-center gap-0.5 rounded-full bg-pink-50 px-1.5 py-0.5 text-xs text-pink-600">
-                              <GenderFemale className="h-2.5 w-2.5" /> Female
-                            </span>
-                          )}
+                          {hasMale && <span className="flex items-center gap-0.5 rounded-full bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600"><GenderMale className="h-2.5 w-2.5" /> Male</span>}
+                          {hasFemale && <span className="flex items-center gap-0.5 rounded-full bg-pink-50 px-1.5 py-0.5 text-xs text-pink-600"><GenderFemale className="h-2.5 w-2.5" /> Female</span>}
                         </div>
                       )}
                     </button>
                   );
                 })}
 
-                {/* Create custom template card */}
-                <button
-                  onClick={() => setShowCustomDialog(true)}
-                  className="rounded-xl border-2 border-dashed border-primary/30 p-3 text-left transition-all hover:border-primary/60 hover:bg-primary/5"
-                >
+                <button onClick={() => setShowCustomDialog(true)}
+                  className="rounded-xl border-2 border-dashed border-primary/30 p-3 text-left transition-all hover:border-primary/60 hover:bg-primary/5">
                   <div className="flex items-center gap-2 text-primary">
                     <Plus className="h-4 w-4" />
                     <p className="text-sm font-semibold">Create custom template</p>
@@ -785,59 +1124,32 @@ export default function NewCampaignPage() {
             </CardContent>
           </Card>
 
-          {/* Create custom template dialog */}
-          <Dialog
-            open={showCustomDialog}
-            onOpenChange={(open) => {
-              if (!open) { setCustomBaseId(''); setCustomForm(emptyCustomForm); }
-              setShowCustomDialog(open);
-            }}
-          >
+          <Dialog open={showCustomDialog} onOpenChange={(open) => {
+            if (!open) { setCustomBaseId(''); setCustomForm(emptyCustomForm); }
+            setShowCustomDialog(open);
+          }}>
             <DialogContent className="max-w-3xl max-h-[92vh] flex flex-col overflow-hidden">
               <DialogHeader className="shrink-0">
                 <DialogTitle>Create Custom Template</DialogTitle>
               </DialogHeader>
-
               <div className="flex-1 min-h-0 overflow-y-auto space-y-4">
                 <div className="space-y-1.5">
                   <Label>Start from base template (optional)</Label>
                   <Select value={customBaseId} onValueChange={handleCustomBaseChange}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Start from scratch…" />
-                    </SelectTrigger>
+                    <SelectTrigger><SelectValue placeholder="Start from scratch…" /></SelectTrigger>
                     <SelectContent>
-                      {templates.map((t: any) => (
-                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                      ))}
+                      {templates.map((t: any) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
-                  {customBaseId && (
-                    <p className="text-xs text-muted-foreground">
-                      Content copied from base template — the original will not be modified.
-                    </p>
-                  )}
+                  {customBaseId && <p className="text-xs text-muted-foreground">Content copied — original not modified.</p>}
                 </div>
-
-                <VisualEmailEditor
-                  value={customForm}
-                  onChange={setCustomForm}
-                  categories={(categories as any[]) || []}
-                  showNameAndCategory
-                  allowPendingAttachments
-                />
+                <VisualEmailEditor value={customForm} onChange={setCustomForm}
+                  categories={(categories as any[]) || []} showNameAndCategory allowPendingAttachments />
               </div>
-
               <DialogFooter className="shrink-0">
                 <Button variant="outline" onClick={() => setShowCustomDialog(false)}>Cancel</Button>
-                <Button
-                  onClick={() => createCustomMutation.mutate(customForm)}
-                  disabled={
-                    createCustomMutation.isPending ||
-                    !customForm.name.trim() ||
-                    !customForm.subject.trim() ||
-                    !customForm.bodyText.trim()
-                  }
-                >
+                <Button onClick={() => createCustomMutation.mutate(customForm)}
+                  disabled={createCustomMutation.isPending || !customForm.name.trim() || !customForm.subject.trim() || !customForm.bodyText.trim()}>
                   {createCustomMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Create &amp; Select
                 </Button>
@@ -845,7 +1157,6 @@ export default function NewCampaignPage() {
             </DialogContent>
           </Dialog>
 
-          {/* Scheduling */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
@@ -855,81 +1166,46 @@ export default function NewCampaignPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <button
-                  onClick={() => setScheduledAt('')}
-                  className={cn(
-                    'flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    !scheduledAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
-                  )}
-                >
+                <button onClick={() => setScheduledAt('')}
+                  className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                    !scheduledAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
                   <div className={cn('rounded-lg p-1.5', !scheduledAt ? 'bg-primary/10' : 'bg-muted')}>
                     <Zap className={cn('h-4 w-4', !scheduledAt ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold">Send now</p>
-                    <p className="text-xs text-muted-foreground">Immediately</p>
-                  </div>
+                  <div><p className="text-sm font-semibold">Send now</p><p className="text-xs text-muted-foreground">Immediately</p></div>
                 </button>
 
-                <button
-                  onClick={() => setScheduledAt(getNextBusinessDay())}
-                  className={cn(
-                    'flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    scheduledAt === getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
-                  )}
-                >
+                <button onClick={() => setScheduledAt(getNextBusinessDay())}
+                  className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                    scheduledAt === getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
                   <div className={cn('rounded-lg p-1.5', scheduledAt === getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
                     <Clock className={cn('h-4 w-4', scheduledAt === getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold">Next business day</p>
-                    <p className="text-xs text-muted-foreground">8:30 AM</p>
-                  </div>
+                  <div><p className="text-sm font-semibold">Next business day</p><p className="text-xs text-muted-foreground">8:30 AM</p></div>
                 </button>
 
-                <button
-                  onClick={() => {
-                    if (!scheduledAt || scheduledAt === getNextBusinessDay()) {
-                      setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16));
-                    }
-                  }}
-                  className={cn(
-                    'flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    scheduledAt && scheduledAt !== getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40',
-                  )}
-                >
+                <button onClick={() => { if (!scheduledAt || scheduledAt === getNextBusinessDay()) setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16)); }}
+                  className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
+                    scheduledAt && scheduledAt !== getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
                   <div className={cn('rounded-lg p-1.5', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
                     <Calendar className={cn('h-4 w-4', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold">Custom time</p>
-                    <p className="text-xs text-muted-foreground">Pick date & time</p>
-                  </div>
+                  <div><p className="text-sm font-semibold">Custom time</p><p className="text-xs text-muted-foreground">Pick date & time</p></div>
                 </button>
               </div>
 
-              {scheduledAt && scheduledAt !== '' && (
+              {scheduledAt && (
                 <div className="grid grid-cols-1 gap-3 rounded-xl border bg-muted/30 p-4 sm:grid-cols-2">
                   <div className="space-y-1.5">
                     <Label>Date & Time</Label>
-                    <Input
-                      type="datetime-local"
-                      value={scheduledAt}
-                      onChange={(e) => setScheduledAt(e.target.value)}
-                      min={new Date().toISOString().slice(0, 16)}
-                    />
+                    <Input type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)}
+                      min={new Date().toISOString().slice(0, 16)} />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Timezone</Label>
                     <Select value={timezone} onValueChange={setTimezone}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {TIMEZONES.map((tz) => (
-                          <SelectItem key={tz} value={tz}>{tz}</SelectItem>
-                        ))}
-                      </SelectContent>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>{TIMEZONES.map((tz) => <SelectItem key={tz} value={tz}>{tz}</SelectItem>)}</SelectContent>
                     </Select>
                   </div>
                 </div>
@@ -951,6 +1227,14 @@ export default function NewCampaignPage() {
                   <dd className="font-semibold">{campaignName}</dd>
                 </div>
                 <div className="flex justify-between border-b pb-3">
+                  <dt className="text-muted-foreground">Mode</dt>
+                  <dd className="flex items-center gap-1.5">
+                    {campaignMode === 'routing'
+                      ? <><GitBranch className="h-3.5 w-3.5 text-primary" /><span className="font-medium">Smart Routing</span></>
+                      : <><FileText className="h-3.5 w-3.5" /><span className="font-medium">Single Template</span></>}
+                  </dd>
+                </div>
+                <div className="flex justify-between border-b pb-3">
                   <dt className="text-muted-foreground">Recipients</dt>
                   <dd className="font-semibold">{selectedIds.size} contacts</dd>
                 </div>
@@ -958,21 +1242,9 @@ export default function NewCampaignPage() {
                   <div className="flex justify-between border-b pb-3">
                     <dt className="text-muted-foreground">Gender split</dt>
                     <dd className="flex items-center gap-2">
-                      {maleCount > 0 && (
-                        <span className="flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
-                          <GenderMale className="h-3 w-3" /> {maleCount} male
-                        </span>
-                      )}
-                      {femaleCount > 0 && (
-                        <span className="flex items-center gap-1 rounded-full bg-pink-50 px-2 py-0.5 text-xs text-pink-700">
-                          <GenderFemale className="h-3 w-3" /> {femaleCount} female
-                        </span>
-                      )}
-                      {unknownCount > 0 && (
-                        <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                          {unknownCount} default
-                        </span>
-                      )}
+                      {maleCount > 0 && <span className="flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700"><GenderMale className="h-3 w-3" /> {maleCount} male</span>}
+                      {femaleCount > 0 && <span className="flex items-center gap-1 rounded-full bg-pink-50 px-2 py-0.5 text-xs text-pink-700"><GenderFemale className="h-3 w-3" /> {femaleCount} female</span>}
+                      {unknownCount > 0 && <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{unknownCount} default</span>}
                     </dd>
                   </div>
                 ) : genderSkipped ? (
@@ -981,36 +1253,41 @@ export default function NewCampaignPage() {
                     <dd className="text-muted-foreground text-xs italic">Skipped — default version for all</dd>
                   </div>
                 ) : null}
-                <div className="flex justify-between border-b pb-3">
-                  <dt className="text-muted-foreground">Template</dt>
-                  <dd className="font-semibold">{selectedTemplate?.name}</dd>
-                </div>
-                <div className="flex justify-between border-b pb-3">
-                  <dt className="text-muted-foreground">Default subject</dt>
-                  <dd className="max-w-xs truncate font-medium italic">"{selectedTemplate?.subject}"</dd>
-                </div>
-                {(selectedTemplate?.maleSubject || selectedTemplate?.maleBodyHtml) && (
-                  <div className="flex justify-between border-b pb-3">
-                    <dt className="text-muted-foreground">Male variant</dt>
-                    <dd className="flex items-center gap-1 text-xs text-blue-700">
-                      <GenderMale className="h-3 w-3" />
-                      {selectedTemplate?.maleSubject
-                        ? <span className="truncate max-w-xs italic">"{selectedTemplate.maleSubject}"</span>
-                        : 'uses default subject'}
-                    </dd>
-                  </div>
+
+                {campaignMode === 'routing' ? (
+                  <>
+                    <div className="border-b pb-3">
+                      <dt className="text-muted-foreground mb-2">Template assignment breakdown</dt>
+                      <dd className="space-y-1.5">
+                        {Object.entries(routingByTemplate).map(([key, val]) => (
+                          <div key={key} className="flex items-center justify-between rounded-lg bg-muted/40 px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              {val.category && (
+                                <span className={cn('rounded-full border px-2 py-0.5 text-xs font-medium', getCategoryColor(val.category))}>
+                                  {val.category}
+                                </span>
+                              )}
+                              <span className="text-xs font-medium">{val.name}</span>
+                            </div>
+                            <span className="text-xs text-muted-foreground">{val.count} contact{val.count !== 1 ? 's' : ''}</span>
+                          </div>
+                        ))}
+                      </dd>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between border-b pb-3">
+                      <dt className="text-muted-foreground">Template</dt>
+                      <dd className="font-semibold">{selectedTemplate?.name}</dd>
+                    </div>
+                    <div className="flex justify-between border-b pb-3">
+                      <dt className="text-muted-foreground">Default subject</dt>
+                      <dd className="max-w-xs truncate font-medium italic">"{selectedTemplate?.subject}"</dd>
+                    </div>
+                  </>
                 )}
-                {(selectedTemplate?.femaleSubject || selectedTemplate?.femaleBodyHtml) && (
-                  <div className="flex justify-between border-b pb-3">
-                    <dt className="text-muted-foreground">Female variant</dt>
-                    <dd className="flex items-center gap-1 text-xs text-pink-700">
-                      <GenderFemale className="h-3 w-3" />
-                      {selectedTemplate?.femaleSubject
-                        ? <span className="truncate max-w-xs italic">"{selectedTemplate.femaleSubject}"</span>
-                        : 'uses default subject'}
-                    </dd>
-                  </div>
-                )}
+
                 <div className="flex justify-between">
                   <dt className="text-muted-foreground">Send time</dt>
                   <dd className="font-semibold">

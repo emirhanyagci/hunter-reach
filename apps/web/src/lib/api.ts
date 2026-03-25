@@ -52,6 +52,7 @@ export const contactsApi = {
     api.get('/contacts', { params }).then((r) => r.data),
   getStats: () => api.get('/contacts/stats').then((r) => r.data),
   getOne: (id: string) => api.get(`/contacts/${id}`).then((r) => r.data),
+  create: (data: any) => api.post('/contacts', data).then((r) => r.data),
   update: (id: string, data: any) => api.patch(`/contacts/${id}`, data).then((r) => r.data),
   delete: (id: string) => api.delete(`/contacts/${id}`).then((r) => r.data),
   bulkDelete: (ids: string[]) => api.delete('/contacts/bulk', { data: { ids } }).then((r) => r.data),
@@ -110,11 +111,27 @@ export const campaignsApi = {
     api.post('/campaigns/detect-genders', { contactIds }).then((r) => r.data),
 };
 
+// ── Routing Rules ─────────────────────────────────────────────────────────────
+export const routingRulesApi = {
+  getAll: () => api.get('/routing-rules').then((r) => r.data),
+  create: (data: { categoryName: string; keywords: string[]; templateId?: string; priority?: number }) =>
+    api.post('/routing-rules', data).then((r) => r.data),
+  update: (id: string, data: { categoryName?: string; keywords?: string[]; templateId?: string; priority?: number }) =>
+    api.put(`/routing-rules/${id}`, data).then((r) => r.data),
+  remove: (id: string) => api.delete(`/routing-rules/${id}`).then((r) => r.data),
+  previewRouting: (contactIds: string[], fallbackTemplateId?: string) =>
+    api.post('/routing-rules/preview', { contactIds, fallbackTemplateId }).then((r) => r.data),
+};
+
 // ── Email Jobs ─────────────────────────────────────────────────────────────────
 export const emailJobsApi = {
   getAll: (params?: Record<string, any>) =>
     api.get('/email-jobs', { params }).then((r) => r.data),
   getOne: (id: string) => api.get(`/email-jobs/${id}`).then((r) => r.data),
+  getContactActivity: (contactId: string) =>
+    api.get(`/email-jobs/contact/${contactId}`).then((r) => r.data),
   cancel: (id: string) => api.patch(`/email-jobs/${id}/cancel`).then((r) => r.data),
   retry: (id: string) => api.patch(`/email-jobs/${id}/retry`).then((r) => r.data),
+  sendReminder: (data: { emailJobIds: string[]; templateId: string; customSubject?: string; customBodyHtml?: string }) =>
+    api.post('/email-jobs/remind', data).then((r) => r.data),
 };

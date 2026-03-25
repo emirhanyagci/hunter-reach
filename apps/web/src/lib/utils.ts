@@ -30,4 +30,10 @@ export const STATUS_COLORS = {
   draft: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
   sending: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
   done: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+  replied: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200',
+  delivered: 'bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200',
+  opened: 'bg-sky-100 text-sky-800 dark:bg-sky-900 dark:text-sky-200',
+  clicked: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200',
+  bounced: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+  complained: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
 } as const;

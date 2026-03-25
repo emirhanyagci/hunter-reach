@@ -9,11 +9,20 @@ import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { StatusBadge } from '@/components/email-jobs/status-badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Search, Trash2, Users, AlertCircle, Linkedin, Mail } from 'lucide-react';
+import { Search, Trash2, Users, AlertCircle, Linkedin, Mail, UserPlus, Pencil, History, MessageSquare, Calendar, Clock } from 'lucide-react';
 import { useSearchParams } from 'next/navigation';
 import { formatDate } from '@/lib/utils';
 import Link from 'next/link';
 import { SendEmailModal } from '@/components/contacts/send-email-modal';
+import { ContactFormModal } from '@/components/contacts/contact-form-modal';
+import { ContactActivityModal } from '@/components/contacts/contact-activity-modal';
+
+const EMAIL_STATUS_CONFIG = {
+  never_contacted: { label: 'Never contacted', icon: Clock, color: 'text-muted-foreground', dot: 'bg-muted-foreground/40' },
+  scheduled: { label: 'Scheduled', icon: Calendar, color: 'text-blue-600', dot: 'bg-blue-500' },
+  sent: { label: 'Sent', icon: Mail, color: 'text-orange-600', dot: 'bg-orange-500' },
+  replied: { label: 'Replied', icon: MessageSquare, color: 'text-green-600', dot: 'bg-green-500' },
+} as const;
 
 function ContactsContent() {
   const searchParams = useSearchParams();
@@ -26,6 +35,9 @@ function ContactsContent() {
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [sendEmailContact, setSendEmailContact] = useState<any>(null);
+  const [contactFormOpen, setContactFormOpen] = useState(false);
+  const [editContact, setEditContact] = useState<any>(null);
+  const [activityContactId, setActivityContactId] = useState<string | null>(null);
 
   const importId = searchParams.get('importId');
 
@@ -68,21 +80,27 @@ function ContactsContent() {
         title="Contacts"
         description={`${total.toLocaleString()} contacts in your database`}
         actions={
-          selectedIds.size > 0 ? (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => deleteMutation.mutate([...selectedIds])}
-              disabled={deleteMutation.isPending}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete {selectedIds.size} selected
+          <div className="flex items-center gap-2">
+            {selectedIds.size > 0 ? (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => deleteMutation.mutate([...selectedIds])}
+                disabled={deleteMutation.isPending}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete {selectedIds.size} selected
+              </Button>
+            ) : (
+              <Link href="/dashboard/campaigns/new">
+                <Button size="sm" variant="outline">Create Campaign</Button>
+              </Link>
+            )}
+            <Button size="sm" onClick={() => { setEditContact(null); setContactFormOpen(true); }}>
+              <UserPlus className="mr-2 h-4 w-4" />
+              Add Contact
             </Button>
-          ) : (
-            <Link href="/dashboard/campaigns/new">
-              <Button size="sm">Create Campaign</Button>
-            </Link>
-          )
+          </div>
         }
       />
 
@@ -162,7 +180,8 @@ function ContactsContent() {
                     <th className="p-4 text-left font-medium text-muted-foreground">Contact</th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Company</th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Job Title</th>
-                    <th className="p-4 text-left font-medium text-muted-foreground">Status</th>
+                    <th className="p-4 text-left font-medium text-muted-foreground">Email Status</th>
+                    <th className="p-4 text-left font-medium text-muted-foreground">Verification</th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Score</th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Added</th>
                     <th className="p-4" />
@@ -200,6 +219,24 @@ function ContactsContent() {
                       <td className="p-4 text-muted-foreground">{contact.company || '—'}</td>
                       <td className="p-4 text-muted-foreground">{contact.jobTitle || '—'}</td>
                       <td className="p-4">
+                        {(() => {
+                          const status = (contact.emailStatus ?? 'never_contacted') as keyof typeof EMAIL_STATUS_CONFIG;
+                          const cfg = EMAIL_STATUS_CONFIG[status];
+                          const Icon = cfg.icon;
+                          return (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setActivityContactId(contact.id); }}
+                              className={`inline-flex items-center gap-1.5 text-xs font-medium ${cfg.color} hover:underline`}
+                              title="View email history"
+                            >
+                              <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
+                              <Icon className="h-3 w-3" />
+                              {cfg.label}
+                            </button>
+                          );
+                        })()}
+                      </td>
+                      <td className="p-4">
                         {contact.verificationStatus ? (
                           <StatusBadge status={contact.verificationStatus} />
                         ) : contact.isValid ? (
@@ -225,15 +262,35 @@ function ContactsContent() {
                       </td>
                       <td className="p-4 text-xs text-muted-foreground">{formatDate(contact.createdAt)}</td>
                       <td className="p-4">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 w-8 p-0 text-muted-foreground hover:text-primary"
-                          title="Send email"
-                          onClick={(e) => { e.stopPropagation(); setSendEmailContact(contact); }}
-                        >
-                          <Mail className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0 text-muted-foreground hover:text-primary"
+                            title="View email history"
+                            onClick={(e) => { e.stopPropagation(); setActivityContactId(contact.id); }}
+                          >
+                            <History className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0 text-muted-foreground hover:text-primary"
+                            title="Edit contact"
+                            onClick={(e) => { e.stopPropagation(); setEditContact(contact); setContactFormOpen(true); }}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0 text-muted-foreground hover:text-primary"
+                            title="Send email"
+                            onClick={(e) => { e.stopPropagation(); setSendEmailContact(contact); }}
+                          >
+                            <Mail className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -265,6 +322,18 @@ function ContactsContent() {
         contact={sendEmailContact}
         open={!!sendEmailContact}
         onOpenChange={(open) => { if (!open) setSendEmailContact(null); }}
+      />
+
+      <ContactFormModal
+        open={contactFormOpen}
+        onOpenChange={(open) => { setContactFormOpen(open); if (!open) setEditContact(null); }}
+        contact={editContact}
+      />
+
+      <ContactActivityModal
+        contactId={activityContactId}
+        open={!!activityContactId}
+        onOpenChange={(open) => { if (!open) setActivityContactId(null); }}
       />
     </div>
   );

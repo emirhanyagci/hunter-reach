@@ -232,14 +232,14 @@ export default function TemplatesPage() {
                   "{template.subject}"
                 </p>
                 <div className="flex flex-wrap gap-1">
-                  {template.variables.slice(0, 5).map((v: string) => (
+                  {(template.variables ?? []).slice(0, 5).map((v: string) => (
                     <span key={v} className="rounded-full bg-primary/10 px-2 py-0.5 font-mono text-xs text-primary">
                       {`{{${v}}}`}
                     </span>
                   ))}
-                  {template.variables.length > 5 && (
+                  {(template.variables ?? []).length > 5 && (
                     <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                      +{template.variables.length - 5}
+                      +{(template.variables ?? []).length - 5}
                     </span>
                   )}
                 </div>

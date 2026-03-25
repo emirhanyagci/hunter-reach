@@ -18,6 +18,7 @@ export interface SendEmailOptions {
   text?: string;
   userId: string;
   attachments?: EmailAttachment[];
+  threadId?: string;
 }
 
 // Encode non-ASCII header values using RFC 2047 Base64 encoding.
@@ -36,7 +37,7 @@ export class EmailService {
     private gmailAuthService: GmailAuthService,
   ) {}
 
-  async send(options: SendEmailOptions): Promise<{ id: string }> {
+  async send(options: SendEmailOptions): Promise<{ id: string; threadId?: string }> {
     // Gmail API (OAuth2) — uses HTTP, no SMTP auth issues
     const gmailClient = await this.gmailAuthService.getAuthorizedClient(options.userId);
     if (gmailClient) {
@@ -56,7 +57,7 @@ export class EmailService {
   }
 
   // ── Gmail HTTP API ─────────────────────────────────────────────────────────
-  private async sendViaGmailApi(options: SendEmailOptions, authClient: any): Promise<{ id: string }> {
+  private async sendViaGmailApi(options: SendEmailOptions, authClient: any): Promise<{ id: string; threadId?: string }> {
     const gmail = google.gmail({ version: 'v1', auth: authClient });
 
     const raw = options.attachments?.length
@@ -69,13 +70,18 @@ export class EmailService {
       .replace(/\//g, '_')
       .replace(/=+$/, '');
 
+    const requestBody: any = { raw: encoded };
+    if (options.threadId) {
+      requestBody.threadId = options.threadId;
+    }
+
     const res = await gmail.users.messages.send({
       userId: 'me',
-      requestBody: { raw: encoded },
+      requestBody,
     });
 
-    this.logger.log(`✅ [Gmail API] Sent to ${options.to} — ID: ${res.data.id}`);
-    return { id: res.data.id ?? '' };
+    this.logger.log(`✅ [Gmail API] Sent to ${options.to} — ID: ${res.data.id}, Thread: ${res.data.threadId}`);
+    return { id: res.data.id ?? '', threadId: res.data.threadId ?? undefined };
   }
 
   /** Simple HTML message — no attachments */
@@ -133,7 +139,7 @@ export class EmailService {
   }
 
   // ── SMTP fallback ──────────────────────────────────────────────────────────
-  private async sendViaSmtp(options: SendEmailOptions, user: string, pass: string): Promise<{ id: string }> {
+  private async sendViaSmtp(options: SendEmailOptions, user: string, pass: string): Promise<{ id: string; threadId?: string }> {
     const transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: { user, pass },

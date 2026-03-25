@@ -66,6 +66,7 @@ export class EmailProcessor {
         text: emailJob.renderedBodyText || undefined,
         userId: emailJob.campaign.userId,
         attachments,
+        threadId: (emailJob as any).threadId ?? undefined,
       });
 
       await this.prisma.emailJob.update({
@@ -74,6 +75,7 @@ export class EmailProcessor {
           status: 'SENT',
           sentAt: new Date(),
           providerMessageId: result.id,
+          threadId: result.threadId ?? null,
         },
       });
 

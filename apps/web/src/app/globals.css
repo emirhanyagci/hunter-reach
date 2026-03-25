@@ -55,8 +55,10 @@
 
 /* Ensure Radix UI popper content (Select, Popover, DropdownMenu, etc.)
    always floats above dialogs and other stacking contexts. The popper
-   wrapper uses position:fixed via inline style, so z-index must be
-   declared here to override default stacking order. */
+   wrapper uses position:fixed via inline style (with will-change:transform
+   which creates a stacking context), so z-index must be high enough to
+   escape any parent stacking contexts including dialogs, tables with
+   overflow:hidden, and CSS-transform-positioned elements. */
 [data-radix-popper-content-wrapper] {
-  z-index: 200 !important;
+  z-index: 9999 !important;
 }

@@ -1,6 +1,6 @@
 'use client';
 import { useState, useCallback } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { emailJobsApi, campaignsApi, templatesApi } from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent } from '@/components/ui/card';
@@ -12,7 +12,7 @@ import { SendReminderModal } from '@/components/email-jobs/send-reminder-modal';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { formatDate } from '@/lib/utils';
-import { History, Eye, Mail, Search, Bell, Filter, X, MessageSquare, Calendar } from 'lucide-react';
+import { History, Eye, Mail, Search, Bell, Filter, X, MessageSquare, Calendar, Zap, Loader2 } from 'lucide-react';
 
 const STATUS_OPTIONS = [
   { value: 'all', label: 'All statuses' },
@@ -31,6 +31,7 @@ export default function HistoryPage() {
   const [selectedJob, setSelectedJob] = useState<any>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [reminderOpen, setReminderOpen] = useState(false);
+  const [sendNowConfirm, setSendNowConfirm] = useState<any>(null);
 
   // Filters
   const [status, setStatus] = useState('all');
@@ -97,6 +98,28 @@ export default function HistoryPage() {
       setSelectedIds(new Set(eligibleJobs.map((j) => j.id)));
     }
   }, [selectedIds.size, eligibleJobs]);
+
+  const sendNowMutation = useMutation({
+    mutationFn: (id: string) => emailJobsApi.sendNow(id),
+    onSuccess: async (_, id) => {
+      await queryClient.invalidateQueries({ queryKey: ['email-history'] });
+      await queryClient.invalidateQueries({ queryKey: ['email-jobs'] });
+      await queryClient.invalidateQueries({ queryKey: ['recent-email-jobs'] });
+      setSendNowConfirm(null);
+      const fresh = await emailJobsApi.getOne(id);
+      setSelectedJob((prev: any) => (prev?.id === id ? fresh : prev));
+    },
+    onError: (err: any) => {
+      const msg =
+        err?.response?.data?.message ??
+        (Array.isArray(err?.response?.data?.message) ? err.response.data.message[0] : null) ??
+        err?.message ??
+        'Failed to send';
+      window.alert(msg);
+    },
+  });
+
+  const canSendNow = (job: any) => job?.status === 'SCHEDULED';
 
   const clearFilters = () => {
     setStatus('all');
@@ -331,7 +354,14 @@ export default function HistoryPage() {
                         <td className="p-4 text-xs text-muted-foreground">{job.campaign?.name || '—'}</td>
                         <td className="p-4 text-xs text-muted-foreground">{job.template?.name || '—'}</td>
                         <td className="p-4">
-                          <StatusBadge status={job.status} />
+                          <div className="flex flex-col gap-1">
+                            <StatusBadge status={job.status} />
+                            {job.status === 'SENT' && job.manualSendTriggeredAt && (
+                              <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                                Sent early (Send Now)
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="p-4">
                           {hasReplied ? (
@@ -352,18 +382,42 @@ export default function HistoryPage() {
                           )}
                         </td>
                         <td className="p-4 text-xs text-muted-foreground">
-                          {job.sentAt ? formatDate(job.sentAt) : '—'}
+                          {job.sentAt ? (
+                            formatDate(job.sentAt)
+                          ) : job.status === 'SCHEDULED' && job.scheduledAt ? (
+                            <span>
+                              <span className="text-blue-600 dark:text-blue-400">Scheduled</span>
+                              <br />
+                              {formatDate(job.scheduledAt)}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
                         </td>
                         <td className="p-4">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => setSelectedJob(job)}
-                            title="View details"
-                          >
-                            <Eye className="h-3.5 w-3.5" />
-                          </Button>
+                          <div className="flex items-center gap-0.5">
+                            {canSendNow(job) && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-amber-700 hover:bg-amber-50 hover:text-amber-800 dark:text-amber-400 dark:hover:bg-amber-950"
+                                onClick={() => setSendNowConfirm(job)}
+                                title="Send now (skip schedule)"
+                                disabled={sendNowMutation.isPending}
+                              >
+                                <Zap className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => setSelectedJob(job)}
+                              title="View details"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -407,8 +461,25 @@ export default function HistoryPage() {
                 <div><p className="font-medium text-muted-foreground">Company</p><p>{selectedJob.contact?.company || '—'}</p></div>
                 <div><p className="font-medium text-muted-foreground">Campaign</p><p>{selectedJob.campaign?.name || '—'}</p></div>
                 <div><p className="font-medium text-muted-foreground">Template</p><p>{selectedJob.template?.name || '—'}</p></div>
-                <div><p className="font-medium text-muted-foreground">Sent</p><p>{formatDate(selectedJob.sentAt)}</p></div>
-                <div><p className="font-medium text-muted-foreground">Status</p><StatusBadge status={selectedJob.status} /></div>
+                <div>
+                  <p className="font-medium text-muted-foreground">Planned send</p>
+                  <p>{selectedJob.scheduledAt ? formatDate(selectedJob.scheduledAt) : '—'}</p>
+                </div>
+                <div>
+                  <p className="font-medium text-muted-foreground">Sent</p>
+                  <p>{selectedJob.sentAt ? formatDate(selectedJob.sentAt) : '—'}</p>
+                </div>
+                <div>
+                  <p className="font-medium text-muted-foreground">Status</p>
+                  <div className="flex flex-col gap-1">
+                    <StatusBadge status={selectedJob.status} />
+                    {selectedJob.status === 'SENT' && selectedJob.manualSendTriggeredAt && (
+                      <span className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                        Sent early via Send Now (before planned time)
+                      </span>
+                    )}
+                  </div>
+                </div>
                 {selectedJob.threadId && (
                   <div className="col-span-2">
                     <p className="font-medium text-muted-foreground">Gmail Thread ID</p>
@@ -457,6 +528,25 @@ export default function HistoryPage() {
                   </div>
                 </div>
               )}
+              {canSendNow(selectedJob) && (
+                <div className="border-t pt-3 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    className="gap-2 bg-amber-600 hover:bg-amber-700 text-white"
+                    onClick={() => {
+                      setSendNowConfirm(selectedJob);
+                      setSelectedJob(null);
+                    }}
+                    disabled={sendNowMutation.isPending}
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    Send Now
+                  </Button>
+                  <p className="w-full text-xs text-muted-foreground">
+                    Sends immediately and skips the scheduled time ({selectedJob.scheduledAt ? formatDate(selectedJob.scheduledAt) : ''}).
+                  </p>
+                </div>
+              )}
               {eligibleForReminder(selectedJob) && (
                 <div className="border-t pt-3">
                   <Button
@@ -488,6 +578,48 @@ export default function HistoryPage() {
           queryClient.invalidateQueries({ queryKey: ['email-history'] });
         }}
       />
+
+      <Dialog open={!!sendNowConfirm} onOpenChange={(open) => !open && setSendNowConfirm(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-amber-600" />
+              Send this email now?
+            </DialogTitle>
+          </DialogHeader>
+          {sendNowConfirm && (
+            <div className="space-y-4 text-sm">
+              <p>
+                This message was planned for{' '}
+                <strong>{sendNowConfirm.scheduledAt ? formatDate(sendNowConfirm.scheduledAt) : 'a later time'}</strong>.
+                It will be sent immediately to <strong>{sendNowConfirm.contact?.email}</strong>.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={() => setSendNowConfirm(null)} disabled={sendNowMutation.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  className="gap-2 bg-amber-600 hover:bg-amber-700"
+                  onClick={() => sendNowMutation.mutate(sendNowConfirm.id)}
+                  disabled={sendNowMutation.isPending}
+                >
+                  {sendNowMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Sending…
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="h-4 w-4" />
+                      Send now
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

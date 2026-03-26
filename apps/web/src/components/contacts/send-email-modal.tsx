@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -21,6 +21,7 @@ interface Contact {
   lastName?: string | null;
   company?: string | null;
   jobTitle?: string | null;
+  domain?: string | null;
 }
 
 interface SendEmailModalProps {
@@ -31,6 +32,20 @@ interface SendEmailModalProps {
 
 type Step = 'template' | 'compose';
 
+const MERGE_KEYS = ['first_name', 'last_name', 'company', 'job_title'] as const;
+
+function buildMergeFieldsFromContact(c: Contact | null): Record<(typeof MERGE_KEYS)[number], string> {
+  if (!c) {
+    return { first_name: '', last_name: '', company: '', job_title: '' };
+  }
+  return {
+    first_name: c.firstName ?? '',
+    last_name: c.lastName ?? '',
+    company: c.company ?? '',
+    job_title: c.jobTitle ?? '',
+  };
+}
+
 export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalProps) {
   const [step, setStep] = useState<Step>('template');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
@@ -39,7 +54,12 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
   const [isDetectingGender, setIsDetectingGender] = useState(false);
   const [customSubject, setCustomSubject] = useState('');
   const [customBodyHtml, setCustomBodyHtml] = useState('');
+  const [mergeFields, setMergeFields] = useState<Record<(typeof MERGE_KEYS)[number], string>>(() =>
+    buildMergeFieldsFromContact(null),
+  );
   const [success, setSuccess] = useState(false);
+
+  const deferredMerge = useDeferredValue(mergeFields);
 
   const { data: templates = [] } = useQuery({
     queryKey: ['templates'],
@@ -75,10 +95,10 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
   useEffect(() => {
     if (!selectedTemplateId || !contact || step !== 'compose') return;
 
-    // Populate with default content first
     const defaultContent = getVariantContent('default', selectedTemplate);
     setCustomSubject(defaultContent.subject);
     setCustomBodyHtml(defaultContent.bodyHtml);
+    setMergeFields(buildMergeFieldsFromContact(contact));
     setDetectedGender(null);
     setSelectedGender('default');
 
@@ -102,6 +122,28 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTemplateId, step]);
 
+  const { data: renderedPreview, isFetching: previewLoading } = useQuery({
+    queryKey: [
+      'send-email-render-preview',
+      selectedTemplateId,
+      contact?.id,
+      selectedGender,
+      deferredMerge,
+      customSubject,
+      customBodyHtml,
+    ],
+    queryFn: () =>
+      templatesApi.preview(selectedTemplateId, {
+        contactId: contact!.id,
+        gender: selectedGender !== 'default' ? selectedGender : undefined,
+        variableOverrides: deferredMerge,
+        customSubject,
+        customBodyHtml,
+      }),
+    enabled: open && step === 'compose' && !!selectedTemplateId && !!contact,
+    staleTime: 0,
+  });
+
   const handleGenderChange = (gender: 'male' | 'female' | 'default') => {
     setSelectedGender(gender);
     const content = getVariantContent(gender, selectedTemplate);
@@ -117,6 +159,7 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
         gender: selectedGender !== 'default' ? selectedGender : undefined,
         customSubject,
         customBodyHtml,
+        variableOverrides: mergeFields,
       }),
     onSuccess: () => {
       setSuccess(true);
@@ -130,6 +173,7 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
     setDetectedGender(null);
     setCustomSubject('');
     setCustomBodyHtml('');
+    setMergeFields(buildMergeFieldsFromContact(null));
     setSuccess(false);
     sendMutation.reset();
   };
@@ -146,6 +190,15 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
 
   const contactName = [contact?.firstName, contact?.lastName].filter(Boolean).join(' ');
 
+  const base = contact ? buildMergeFieldsFromContact(contact) : null;
+
+  const fieldLabel: Record<(typeof MERGE_KEYS)[number], string> = {
+    first_name: 'First name',
+    last_name: 'Last name',
+    company: 'Company',
+    job_title: 'Job title',
+  };
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
@@ -156,7 +209,6 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
           </DialogTitle>
         </DialogHeader>
 
-        {/* Contact summary bar */}
         {contact && (
           <div className="flex items-center gap-3 rounded-lg border bg-muted/40 px-3 py-2 text-sm shrink-0">
             <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary font-semibold text-xs shrink-0">
@@ -179,7 +231,6 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
 
         <div className="flex-1 overflow-y-auto min-h-0">
           {success ? (
-            // Success state
             <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-green-100">
                 <CheckCircle2 className="h-7 w-7 text-green-600" />
@@ -192,7 +243,6 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
               </div>
             </div>
           ) : step === 'template' ? (
-            // Step 1: Template selection
             <div className="space-y-3 py-2">
               <p className="text-sm text-muted-foreground">
                 Select a template to send to this contact.
@@ -239,9 +289,7 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
               )}
             </div>
           ) : (
-            // Step 2: Compose
             <div className="space-y-4 py-2">
-              {/* Gender selector */}
               {hasGenderVariants && (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -274,7 +322,44 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
                 </div>
               )}
 
-              {/* Subject */}
+              <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Personalisation (this email only)</Label>
+                  <span className="text-[11px] text-muted-foreground">Edits are not saved to the contact</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {MERGE_KEYS.map((key) => {
+                    const original = base?.[key] ?? '';
+                    const current = mergeFields[key];
+                    const changed = original !== current;
+                    return (
+                      <div key={key} className="space-y-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs text-muted-foreground">{fieldLabel[key]}</span>
+                          {changed && (
+                            <Badge variant="secondary" className="text-[10px] h-5 px-1.5 font-normal">
+                              overridden
+                            </Badge>
+                          )}
+                        </div>
+                        <Input
+                          className="h-8 text-sm"
+                          value={current}
+                          onChange={(e) =>
+                            setMergeFields((prev) => ({ ...prev, [key]: e.target.value }))
+                          }
+                        />
+                        {changed && (
+                          <p className="text-[11px] text-muted-foreground">
+                            Original: <span className="line-through opacity-80">{original || '—'}</span>
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="space-y-1.5">
                 <Label htmlFor="email-subject">Subject</Label>
                 <Input
@@ -285,25 +370,35 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
                 />
               </div>
 
-              {/* Body */}
               <div className="space-y-1.5">
-                <Label>Body</Label>
+                <Label>Preview</Label>
                 <Tabs defaultValue="preview">
                   <TabsList className="h-8">
-                    <TabsTrigger value="preview" className="text-xs h-7">Preview</TabsTrigger>
+                    <TabsTrigger value="preview" className="text-xs h-7">Rendered</TabsTrigger>
                     <TabsTrigger value="edit" className="text-xs h-7">Edit HTML</TabsTrigger>
                   </TabsList>
-                  <TabsContent value="preview" className="mt-2">
-                    <div className="h-56 overflow-auto rounded-lg border bg-white">
+                  <TabsContent value="preview" className="mt-2 space-y-2">
+                    {renderedPreview?.subject != null && (
+                      <div className="rounded-md border bg-background px-3 py-2 text-sm">
+                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Subject</span>
+                        <p className="font-medium leading-snug">{renderedPreview.subject}</p>
+                      </div>
+                    )}
+                    <div className="relative h-56 overflow-auto rounded-lg border bg-white">
+                      {previewLoading && (
+                        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/60">
+                          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                        </div>
+                      )}
                       <iframe
-                        srcDoc={customBodyHtml}
-                        className="w-full h-full"
+                        srcDoc={renderedPreview?.bodyHtml ?? customBodyHtml}
+                        className="w-full h-full min-h-[14rem]"
                         sandbox="allow-same-origin"
                         title="Email preview"
                       />
                     </div>
-                    <p className="mt-1.5 text-xs text-muted-foreground">
-                      Template variables (e.g. <code className="font-mono bg-muted px-1 rounded">{'{{first_name}}'}</code>) will be replaced with contact data on send.
+                    <p className="text-xs text-muted-foreground">
+                      Updates as you edit personalisation fields or the subject/body (HTML tab).
                     </p>
                   </TabsContent>
                   <TabsContent value="edit" className="mt-2">
@@ -317,7 +412,6 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
                 </Tabs>
               </div>
 
-              {/* Attachments info */}
               {selectedTemplate?.attachments?.length > 0 && (
                 <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                   <Paperclip className="h-3.5 w-3.5 shrink-0" />
@@ -327,7 +421,6 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
                 </div>
               )}
 
-              {/* Error state */}
               {sendMutation.isError && (
                 <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                   <AlertCircle className="h-4 w-4 shrink-0" />

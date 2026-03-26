@@ -1,6 +1,6 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { campaignsApi, contactsApi, emailJobsApi } from '@/lib/api';
+import { campaignsApi, contactsApi, emailJobsApi, type CampaignSendingLimits } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusBadge } from '@/components/email-jobs/status-badge';
@@ -9,6 +9,7 @@ import {
   Users, Send, Clock, CheckCircle2, XCircle, BarChart3,
   TrendingUp, Mail, AlertTriangle,
 } from 'lucide-react';
+import { SendingLimitUsage } from '@/components/dashboard/sending-limit-usage';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -34,6 +35,13 @@ export default function DashboardPage() {
   const { data: campaigns } = useQuery({
     queryKey: ['campaigns'],
     queryFn: campaignsApi.getAll,
+  });
+
+  const { data: sendingLimits } = useQuery<CampaignSendingLimits>({
+    queryKey: ['campaign-sending-limits'],
+    queryFn: campaignsApi.getSendingLimits,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
   });
 
   const emailStats = campaignStats?.emails || [];
@@ -116,6 +124,21 @@ export default function DashboardPage() {
           </Card>
         ))}
       </div>
+
+      {sendingLimits && (
+        <SendingLimitUsage
+          data={{
+            maxEmailsPerDay: sendingLimits.maxEmailsPerDay,
+            maxEmailsPerHour: sendingLimits.maxEmailsPerHour,
+            sentTodayUtc: sendingLimits.sentTodayUtc,
+            pendingScheduledTodayUtc: sendingLimits.pendingScheduledTodayUtc,
+            remainingQuotaTodayUtc: sendingLimits.remainingQuotaTodayUtc,
+            sentThisHourUtc: sendingLimits.sentThisHourUtc,
+            pendingScheduledThisHourUtc: sendingLimits.pendingScheduledThisHourUtc,
+            remainingQuotaHourUtc: sendingLimits.remainingQuotaHourUtc,
+          }}
+        />
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Email status chart */}

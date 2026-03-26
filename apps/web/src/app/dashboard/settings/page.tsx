@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Mail, CheckCircle2, XCircle, Loader2, AlertCircle, ExternalLink, Unlink } from 'lucide-react';
 import Cookies from 'js-cookie';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
 function SettingsContent() {
   const queryClient = useQueryClient();

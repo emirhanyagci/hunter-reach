@@ -4,6 +4,11 @@ const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: [],
   },
+  /** Proxy /api to the Nest server so NEXT_PUBLIC_API_URL=/api works in the browser (same origin). */
+  async rewrites() {
+    const target = process.env.API_PROXY_TARGET || 'http://127.0.0.1:4000';
+    return [{ source: '/api/:path*', destination: `${target}/api/:path*` }];
+  },
 };
 
 module.exports = nextConfig;

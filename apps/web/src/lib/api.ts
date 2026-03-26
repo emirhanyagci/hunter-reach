@@ -67,8 +67,17 @@ export const templatesApi = {
   create: (data: any) => api.post('/templates', data).then((r) => r.data),
   update: (id: string, data: any) => api.put(`/templates/${id}`, data).then((r) => r.data),
   delete: (id: string) => api.delete(`/templates/${id}`).then((r) => r.data),
-  preview: (id: string, contactId: string) =>
-    api.post(`/templates/${id}/preview`, { contactId }).then((r) => r.data),
+  preview: (
+    id: string,
+    body: {
+      contactId: string;
+      gender?: string;
+      variableOverrides?: Record<string, string>;
+      customSubject?: string;
+      customBodyHtml?: string;
+      customBodyText?: string;
+    },
+  ) => api.post(`/templates/${id}/preview`, body).then((r) => r.data),
   getCategories: () => api.get('/templates/categories').then((r) => r.data),
   createCategory: (name: string) => api.post('/templates/categories', { name }).then((r) => r.data),
   sendTestEmail: (data: {
@@ -87,6 +96,7 @@ export const templatesApi = {
     customSubject?: string;
     customBodyHtml?: string;
     customBodyText?: string;
+    variableOverrides?: Record<string, string>;
   }) => api.post('/templates/send-to-contact', data).then((r) => r.data),
   uploadAttachments: (templateId: string, files: File[]) => {
     const form = new FormData();
@@ -101,10 +111,33 @@ export const templatesApi = {
     api.delete(`/templates/${templateId}/attachments/${attachmentId}`).then((r) => r.data),
 };
 
+/** Response from GET /campaigns/sending-limits */
+export type CampaignSendingLimits = {
+  maxRecipientsPerCampaign: number;
+  maxEmailsPerDay: number;
+  maxEmailsPerHour: number;
+  maxEmailsPerMinute: number;
+  staggerJitterMs: number;
+  sentTodayUtc: number;
+  pendingScheduledTodayUtc: number;
+  remainingQuotaTodayUtc: number;
+  sentThisHourUtc: number;
+  pendingScheduledThisHourUtc: number;
+  remainingQuotaHourUtc: number;
+  minStaggerIntervalMs?: number;
+  queue?: {
+    limiterMaxPerWindow: number;
+    limiterWindowMs: number;
+    concurrency: number;
+  };
+};
+
 // ── Campaigns ─────────────────────────────────────────────────────────────────
 export const campaignsApi = {
   getAll: () => api.get('/campaigns').then((r) => r.data),
   getStats: () => api.get('/campaigns/stats').then((r) => r.data),
+  /** Caps and today's usage (UTC) for campaign UI. */
+  getSendingLimits: () => api.get<CampaignSendingLimits>('/campaigns/sending-limits').then((r) => r.data),
   getOne: (id: string) => api.get(`/campaigns/${id}`).then((r) => r.data),
   create: (data: any) => api.post('/campaigns', data).then((r) => r.data),
   cancel: (id: string) => api.delete(`/campaigns/${id}`).then((r) => r.data),
@@ -115,13 +148,36 @@ export const campaignsApi = {
 // ── Routing Rules ─────────────────────────────────────────────────────────────
 export const routingRulesApi = {
   getAll: () => api.get('/routing-rules').then((r) => r.data),
-  create: (data: { categoryName: string; keywords: string[]; templateId?: string; priority?: number }) =>
-    api.post('/routing-rules', data).then((r) => r.data),
-  update: (id: string, data: { categoryName?: string; keywords?: string[]; templateId?: string; priority?: number }) =>
+  create: (data: {
+    categoryName: string;
+    keywords?: string[];
+    exactPhrases?: string[];
+    templateId?: string;
+    priority?: number;
+  }) => api.post('/routing-rules', data).then((r) => r.data),
+  update: (id: string, data: {
+    categoryName?: string;
+    keywords?: string[];
+    exactPhrases?: string[];
+    templateId?: string;
+    priority?: number;
+  }) =>
     api.put(`/routing-rules/${id}`, data).then((r) => r.data),
   remove: (id: string) => api.delete(`/routing-rules/${id}`).then((r) => r.data),
   previewRouting: (contactIds: string[], fallbackTemplateId?: string) =>
     api.post('/routing-rules/preview', { contactIds, fallbackTemplateId }).then((r) => r.data),
+};
+
+// ── Company Notes ─────────────────────────────────────────────────────────────
+export const companyNotesApi = {
+  getAll: (params?: { search?: string; page?: number; limit?: number }) =>
+    api.get('/company-notes', { params }).then((r) => r.data),
+  getOne: (id: string) => api.get(`/company-notes/${id}`).then((r) => r.data),
+  create: (data: { companyName: string; content?: string; links?: { label: string; url: string }[] }) =>
+    api.post('/company-notes', data).then((r) => r.data),
+  update: (id: string, data: { companyName?: string; content?: string; links?: { label: string; url: string }[] }) =>
+    api.patch(`/company-notes/${id}`, data).then((r) => r.data),
+  remove: (id: string) => api.delete(`/company-notes/${id}`).then((r) => r.data),
 };
 
 // ── Email Jobs ─────────────────────────────────────────────────────────────────
@@ -133,6 +189,7 @@ export const emailJobsApi = {
     api.get(`/email-jobs/contact/${contactId}`).then((r) => r.data),
   cancel: (id: string) => api.patch(`/email-jobs/${id}/cancel`).then((r) => r.data),
   retry: (id: string) => api.patch(`/email-jobs/${id}/retry`).then((r) => r.data),
+  sendNow: (id: string) => api.post(`/email-jobs/send-now/${id}`).then((r) => r.data),
   sendReminder: (data: { emailJobIds: string[]; templateId: string; customSubject?: string; customBodyHtml?: string }) =>
     api.post('/email-jobs/remind', data).then((r) => r.data),
 };

@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Users, FileText, Send, Clock, History,
-  Upload, LogOut, Zap, Settings, GitBranch,
+  Upload, LogOut, Zap, Settings, GitBranch, BookMarked,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Cookies from 'js-cookie';
@@ -18,6 +18,7 @@ const navItems = [
   { href: '/dashboard/campaigns', label: 'Campaigns', icon: Send },
   { href: '/dashboard/scheduled', label: 'Scheduled', icon: Clock },
   { href: '/dashboard/history', label: 'History', icon: History },
+  { href: '/dashboard/company-notes', label: 'Company Notes', icon: BookMarked },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings },
 ];
 

@@ -13,6 +13,7 @@ import { SchedulerModule } from './scheduler/scheduler.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { GmailAuthModule } from './gmail-auth/gmail-auth.module';
 import { RoutingRulesModule } from './routing-rules/routing-rules.module';
+import { CompanyNotesModule } from './company-notes/company-notes.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { RoutingRulesModule } from './routing-rules/routing-rules.module';
     WebhooksModule,
     GmailAuthModule,
     RoutingRulesModule,
+    CompanyNotesModule,
   ],
 })
 export class AppModule {}

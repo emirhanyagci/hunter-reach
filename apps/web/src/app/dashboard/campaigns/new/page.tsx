@@ -2,7 +2,7 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
-import { contactsApi, templatesApi, campaignsApi, routingRulesApi } from '@/lib/api';
+import { contactsApi, templatesApi, campaignsApi, routingRulesApi, type CampaignSendingLimits } from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -16,12 +16,20 @@ import {
 } from '@/components/templates/visual-email-editor';
 import {
   Users, Calendar, Send, Loader2, ChevronRight, ChevronLeft,
-  Search, CheckCircle2, AlertCircle, Briefcase, Clock, Zap, Tag,
+  CheckCircle2, AlertCircle, Clock, Zap,
   HelpCircle, SkipForward, Linkedin, Plus, GitBranch,
-  FileText, RefreshCw,
+  FileText, RefreshCw, PenLine, Wand2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
+import {
+  ContactsFiltersBar,
+  clearContactsFilters,
+  contactsFiltersToQueryParams,
+  type ContactsFilterFields,
+} from '@/components/contacts/contacts-filters-bar';
+import { ContactEmailStatusLabel } from '@/lib/contact-email-status';
+import { StatusBadge } from '@/components/email-jobs/status-badge';
 
 function GenderMale({ className }: { className?: string }) {
   return <span className={cn('font-bold leading-none', className)}>♂</span>;
@@ -93,8 +101,60 @@ function getCategoryColor(name: string | null) {
   return CATEGORY_COLORS[name] ?? 'bg-muted text-muted-foreground border-border';
 }
 
-const SINGLE_STEPS = ['Recipients', 'Gender Detection', 'Template & Schedule', 'Review'];
-const ROUTING_STEPS = ['Recipients', 'Gender Detection', 'Template Routing', 'Review'];
+function formatCampaignCreateError(err: unknown): string {
+  const data = (err as { response?: { data?: { message?: unknown } } })?.response?.data;
+  if (!data) return 'Failed to create campaign';
+  const m = data.message;
+  if (typeof m === 'string') return m;
+  if (Array.isArray(m)) return m.join(' ');
+  return 'Failed to create campaign';
+}
+
+const SINGLE_STEPS = ['Recipients', 'Gender Detection', 'Personalization', 'Template & Schedule', 'Review'];
+const ROUTING_STEPS = ['Recipients', 'Gender Detection', 'Personalization', 'Template Routing', 'Review'];
+
+function parseRoutingKeywords(input: string): string[] {
+  return input.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * The canonical rule for a routing category: highest priority among rules in that category,
+ * preferring a row that has a template (same row used for template display and for merging keywords).
+ */
+function getCanonicalRoutingRuleForCategory(
+  rules: {
+    id: string;
+    categoryName: string;
+    templateId: string | null;
+    priority: number;
+    keywords: string[];
+    exactPhrases?: string[];
+  }[],
+  categoryName: string,
+) {
+  if (!categoryName) return null;
+  const inCat = rules.filter((r) => r.categoryName === categoryName);
+  if (!inCat.length) return null;
+  const sorted = [...inCat].sort((a, b) => b.priority - a.priority);
+  for (const r of sorted) {
+    if (r.templateId) return r;
+  }
+  return sorted[0] ?? null;
+}
+
+function mergeUniqueTokens(existing: string[], additions: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of [...existing, ...additions]) {
+    const t = s.trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
 
 const TIMEZONES = [
   'UTC', 'Europe/Istanbul', 'America/New_York', 'America/Chicago',
@@ -120,9 +180,13 @@ export default function NewCampaignPage() {
 
   // Step 0 — Recipients
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [search, setSearch] = useState('');
-  const [jobTitleFilter, setJobTitleFilter] = useState('');
-  const [companyFilter, setCompanyFilter] = useState('');
+  const [recipientFilters, setRecipientFilters] = useState<ContactsFilterFields>(() => clearContactsFilters());
+  const [recipientPage, setRecipientPage] = useState(1);
+
+  const handleRecipientFiltersChange = useCallback((next: ContactsFilterFields) => {
+    setRecipientFilters(next);
+    setRecipientPage(1);
+  }, []);
 
   // Step 1 — Gender Detection
   const [genderStates, setGenderStates] = useState<ContactGenderState[]>([]);
@@ -142,14 +206,22 @@ export default function NewCampaignPage() {
   const [routingLoading, setRoutingLoading] = useState(false);
   const [fallbackTemplateId, setFallbackTemplateId] = useState('');
 
+  /** first_name overrides for this campaign only (contactId → edited first name) */
+  const [firstNameOverrides, setFirstNameOverrides] = useState<Record<string, string>>({});
+
+  const [quickRuleDialogOpen, setQuickRuleDialogOpen] = useState(false);
+  const [quickRuleKeyword, setQuickRuleKeyword] = useState('');
+  const [quickRuleMatch, setQuickRuleMatch] = useState<'contains' | 'exact'>('contains');
+  const [quickRuleCategoryName, setQuickRuleCategoryName] = useState('');
+
   // Custom template dialog
   const [showCustomDialog, setShowCustomDialog] = useState(false);
   const [customBaseId, setCustomBaseId] = useState('');
   const [customForm, setCustomForm] = useState<EmailEditorValue>(emptyCustomForm);
 
-  const { data: contactsData } = useQuery({
-    queryKey: ['contacts-campaign', { search, jobTitleFilter, companyFilter }],
-    queryFn: () => contactsApi.getAll({ search, jobTitle: jobTitleFilter, company: companyFilter, limit: 100 }),
+  const { data: contactsData, isLoading: contactsLoading } = useQuery({
+    queryKey: ['contacts-campaign', contactsFiltersToQueryParams(recipientFilters, { page: recipientPage, limit: 50 })],
+    queryFn: () => contactsApi.getAll(contactsFiltersToQueryParams(recipientFilters, { page: recipientPage, limit: 50 })),
   });
 
   const { data: templatesRaw } = useQuery({
@@ -168,9 +240,63 @@ export default function NewCampaignPage() {
     queryFn: routingRulesApi.getAll,
   });
 
+  const existingRoutingCategoryNames = useMemo(
+    () =>
+      [...new Set((routingRules as any[]).map((r: any) => r.categoryName).filter(Boolean))].sort((a, b) =>
+        a.localeCompare(b),
+      ),
+    [routingRules],
+  );
+
+  const quickRuleCanonicalRule = useMemo(
+    () => getCanonicalRoutingRuleForCategory(routingRules as any[], quickRuleCategoryName),
+    [routingRules, quickRuleCategoryName],
+  );
+
+  const quickRuleResolvedTemplateId = quickRuleCanonicalRule?.templateId ?? null;
+
+  const quickRuleResolvedTemplateName = useMemo(() => {
+    if (!quickRuleResolvedTemplateId) return null;
+    return templates.find((t: any) => t.id === quickRuleResolvedTemplateId)?.name ?? null;
+  }, [templates, quickRuleResolvedTemplateId]);
+
+  const { data: sendingLimits } = useQuery<CampaignSendingLimits>({
+    queryKey: ['campaign-sending-limits'],
+    queryFn: campaignsApi.getSendingLimits,
+  });
+
   const sendMutation = useMutation({
     mutationFn: campaignsApi.create,
     onSuccess: () => router.push('/dashboard/campaigns'),
+  });
+
+  const applyQuickRuleMutation = useMutation({
+    mutationFn: async () => {
+      const kw = quickRuleKeyword.trim();
+      if (!kw) throw new Error('Enter a keyword or phrase');
+      if (!quickRuleCategoryName) throw new Error('Select a category');
+      const canonical = getCanonicalRoutingRuleForCategory(routingRules as any[], quickRuleCategoryName);
+      if (!canonical) throw new Error('Could not find a rule for this category.');
+      if (!canonical.templateId) {
+        throw new Error(
+          'No template is linked to this category yet. On Routing Rules, assign a template to at least one rule in this category.',
+        );
+      }
+      const prevKeywords = canonical.keywords ?? [];
+      const prevExact = canonical.exactPhrases ?? [];
+      const addKeywords = quickRuleMatch === 'contains' ? parseRoutingKeywords(kw) : [];
+      const addExact = quickRuleMatch === 'exact' ? [kw] : [];
+      await routingRulesApi.update(canonical.id, {
+        keywords: mergeUniqueTokens(prevKeywords, addKeywords),
+        exactPhrases: mergeUniqueTokens(prevExact, addExact),
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['routing-rules'] });
+      setQuickRuleDialogOpen(false);
+      setRoutingPreviewDone(false);
+      await runRoutingPreview();
+    },
   });
 
   const createCustomMutation = useMutation({
@@ -204,6 +330,8 @@ export default function NewCampaignPage() {
   });
 
   const contacts = contactsData?.data || [];
+  const contactsTotal = contactsData?.total ?? 0;
+  const contactsTotalPages = contactsData?.totalPages ?? 1;
 
   const campaignName = useMemo(() => {
     const selectedContacts = contacts.filter((c: any) => selectedIds.has(c.id));
@@ -285,10 +413,20 @@ export default function NewCampaignPage() {
   }, [selectedIds, fallbackTemplateId]);
 
   useEffect(() => {
-    if (step === 2 && campaignMode === 'routing' && !routingPreviewDone && !routingLoading) {
+    if (step === 3 && campaignMode === 'routing' && !routingPreviewDone && !routingLoading) {
       runRoutingPreview();
     }
   }, [step, campaignMode, routingPreviewDone, routingLoading, runRoutingPreview]);
+
+  useEffect(() => {
+    setFirstNameOverrides((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        if (!selectedIds.has(k)) delete next[k];
+      }
+      return next;
+    });
+  }, [selectedIds]);
 
   const setContactGender = (contactId: string, gender: 'male' | 'female') => {
     setGenderStates((prev) =>
@@ -358,6 +496,20 @@ export default function NewCampaignPage() {
   const selectedTemplate = templates.find((t: any) => t.id === selectedTemplateId);
 
   // ── Sending ──────────────────────────────────────────────────────────────────
+  const buildContactVariableOverrides = (): Record<string, Record<string, string>> => {
+    const out: Record<string, Record<string, string>> = {};
+    for (const id of selectedIds) {
+      const c = contacts.find((x: any) => x.id === id);
+      if (!c) continue;
+      const orig = c.firstName ?? '';
+      const edited = firstNameOverrides[id];
+      if (edited !== undefined && edited !== orig) {
+        out[id] = { first_name: edited };
+      }
+    }
+    return out;
+  };
+
   const handleSend = () => {
     const contactGenders: Record<string, 'male' | 'female'> = {};
     if (!genderSkipped) {
@@ -365,6 +517,11 @@ export default function NewCampaignPage() {
         if (s.assignedGender) contactGenders[s.contactId] = s.assignedGender;
       }
     }
+
+    const contactVariableOverrides = buildContactVariableOverrides();
+    const overridePayload = Object.keys(contactVariableOverrides).length
+      ? { contactVariableOverrides }
+      : {};
 
     if (campaignMode === 'routing') {
       sendMutation.mutate({
@@ -381,6 +538,7 @@ export default function NewCampaignPage() {
             templateId: a.assignedTemplateId!,
             routingSource: a.routingSource,
           })),
+        ...overridePayload,
       });
     } else {
       sendMutation.mutate({
@@ -390,13 +548,18 @@ export default function NewCampaignPage() {
         scheduledAt: scheduledAt || undefined,
         timezone,
         contactGenders,
+        ...overridePayload,
       });
     }
   };
 
+  const overRecipientLimit =
+    !!sendingLimits && selectedIds.size > sendingLimits.maxRecipientsPerCampaign;
+
   const canProceed = [
-    selectedIds.size > 0,
+    selectedIds.size > 0 && !overRecipientLimit,
     genderDetectionComplete,
+    true,
     campaignMode === 'routing'
       ? routingComplete
       : !!selectedTemplateId,
@@ -408,6 +571,17 @@ export default function NewCampaignPage() {
   const unknownCount = genderSkipped
     ? selectedIds.size
     : genderStates.filter((s) => !s.assignedGender).length;
+
+  const personalizationOverrideCount = useMemo(() => {
+    let n = 0;
+    for (const id of selectedIds) {
+      const c = contacts.find((x: any) => x.id === id);
+      if (!c) continue;
+      const o = firstNameOverrides[id];
+      if (o !== undefined && o !== (c.firstName ?? '')) n++;
+    }
+    return n;
+  }, [selectedIds, contacts, firstNameOverrides]);
 
   // Routing summary for review
   const routingByTemplate = routingAssignments.reduce<Record<string, { name: string; count: number; category: string | null }>>((acc, a) => {
@@ -494,10 +668,22 @@ export default function NewCampaignPage() {
           </div>
         ))}
         {selectedIds.size > 0 && (
-          <div className="ml-auto flex items-center gap-1.5 rounded-full border bg-muted/50 px-3 py-1 text-xs font-medium text-muted-foreground">
-            <Users className="h-3.5 w-3.5" />
-            <span className="font-semibold text-foreground">{selectedIds.size}</span>
-            recipient{selectedIds.size !== 1 ? 's' : ''} selected
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            <div className="flex items-center gap-1.5 rounded-full border bg-muted/50 px-3 py-1 text-xs font-medium text-muted-foreground">
+              <Users className="h-3.5 w-3.5" />
+              <span className="font-semibold text-foreground">{selectedIds.size}</span>
+              recipient{selectedIds.size !== 1 ? 's' : ''} selected
+            </div>
+            {sendingLimits && (
+              <span
+                className={cn(
+                  'rounded-full border px-2.5 py-1 text-xs font-medium',
+                  overRecipientLimit ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-border bg-muted/30 text-muted-foreground',
+                )}
+              >
+                Max {sendingLimits.maxRecipientsPerCampaign} / campaign
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -517,45 +703,47 @@ export default function NewCampaignPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Search email, name..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="pl-9"
-                />
+            {sendingLimits && (
+              <div className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2.5 text-xs text-muted-foreground">
+                <p className="font-medium text-foreground">Sending policy (UTC day)</p>
+                <p className="mt-1">
+                  Up to <span className="font-semibold text-foreground">{sendingLimits.maxRecipientsPerCampaign}</span> recipients per
+                  campaign,{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.maxEmailsPerDay}</span> emails per day /{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.maxEmailsPerHour}</span> per hour (UTC). Today:{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.sentTodayUtc}</span> sent,{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.pendingScheduledTodayUtc}</span> queued —{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.remainingQuotaTodayUtc}</span> daily left. This hour:{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.sentThisHourUtc}</span> sent,{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.pendingScheduledThisHourUtc}</span> queued —{' '}
+                  <span className="font-semibold text-foreground">{sendingLimits.remainingQuotaHourUtc}</span> hourly left.
+                </p>
+                <p className="mt-1.5 text-[11px] leading-relaxed">
+                  Sends are staggered automatically (spacing based on hourly/minute caps) so messages do not leave all at once.
+                </p>
               </div>
-              <div className="relative">
-                <Briefcase className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Filter by company..."
-                  value={companyFilter}
-                  onChange={(e) => setCompanyFilter(e.target.value)}
-                  className="pl-9"
-                />
+            )}
+            {overRecipientLimit && (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  Too many recipients ({selectedIds.size}). Reduce to {sendingLimits?.maxRecipientsPerCampaign} or fewer, or ask an
+                  admin to raise <code className="rounded bg-destructive/15 px-1">EMAIL_MAX_RECIPIENTS_PER_CAMPAIGN</code>.
+                </span>
               </div>
-              <div className="relative">
-                <Tag className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Filter by job title..."
-                  value={jobTitleFilter}
-                  onChange={(e) => setJobTitleFilter(e.target.value)}
-                  className="pl-9"
-                />
-              </div>
-            </div>
+            )}
+            <ContactsFiltersBar variant="plain" value={recipientFilters} onFiltersChange={handleRecipientFiltersChange} />
 
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-sm text-muted-foreground">
-                Showing {contacts.length} contacts
-                {(companyFilter || jobTitleFilter || search) && ' (filtered)'}
+                {contactsLoading
+                  ? 'Loading contacts…'
+                  : `Showing ${contacts.length} of ${contactsTotal.toLocaleString()} contacts${contactsTotal !== contacts.length ? ' (this page)' : ''}`}
               </p>
-              <Button variant="outline" size="sm" onClick={toggleAll}>
+              <Button variant="outline" size="sm" onClick={toggleAll} disabled={contactsLoading || contacts.length === 0}>
                 {selectedIds.size === contacts.length && contacts.length > 0
-                  ? 'Deselect all'
-                  : `Select all ${contacts.length}`}
+                  ? 'Deselect all on page'
+                  : `Select all on page (${contacts.length})`}
               </Button>
             </div>
 
@@ -567,35 +755,87 @@ export default function NewCampaignPage() {
                       <Checkbox
                         checked={selectedIds.size === contacts.length && contacts.length > 0}
                         onCheckedChange={toggleAll}
+                        disabled={contactsLoading || contacts.length === 0}
                       />
                     </th>
                     <th className="p-3 text-left font-medium text-muted-foreground">Email</th>
                     <th className="p-3 text-left font-medium text-muted-foreground">Name</th>
                     <th className="p-3 text-left font-medium text-muted-foreground">Company</th>
-                    <th className="p-3 text-left font-medium text-muted-foreground">Job Title</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Job title</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Email status</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Verification</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Tags</th>
+                    <th className="p-3 text-center font-medium text-muted-foreground">LinkedIn</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {contacts.map((c: any) => (
-                    <tr
-                      key={c.id}
-                      className={cn('cursor-pointer transition-colors hover:bg-muted/30', selectedIds.has(c.id) && 'bg-primary/5')}
-                      onClick={() => toggleContact(c.id)}
-                    >
-                      <td className="p-3">
-                        <Checkbox checked={selectedIds.has(c.id)} onCheckedChange={() => toggleContact(c.id)} />
-                      </td>
-                      <td className="p-3 font-medium">{c.email}</td>
-                      <td className="p-3 text-muted-foreground">
-                        {[c.firstName, c.lastName].filter(Boolean).join(' ') || '—'}
-                      </td>
-                      <td className="p-3 text-muted-foreground">{c.company || '—'}</td>
-                      <td className="p-3 text-muted-foreground">{c.jobTitle || '—'}</td>
-                    </tr>
-                  ))}
-                  {contacts.length === 0 && (
+                  {contactsLoading ? (
                     <tr>
-                      <td colSpan={5} className="py-12 text-center text-muted-foreground">
+                      <td colSpan={9} className="py-12 text-center text-muted-foreground">
+                        <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
+                      </td>
+                    </tr>
+                  ) : (
+                    contacts.map((c: any) => (
+                      <tr
+                        key={c.id}
+                        className={cn('cursor-pointer transition-colors hover:bg-muted/30', selectedIds.has(c.id) && 'bg-primary/5')}
+                        onClick={() => toggleContact(c.id)}
+                      >
+                        <td className="p-3">
+                          <Checkbox checked={selectedIds.has(c.id)} onCheckedChange={() => toggleContact(c.id)} />
+                        </td>
+                        <td className="p-3 font-medium">{c.email}</td>
+                        <td className="p-3 text-muted-foreground">
+                          {[c.firstName, c.lastName].filter(Boolean).join(' ') || '—'}
+                        </td>
+                        <td className="p-3 text-muted-foreground">{c.company || '—'}</td>
+                        <td className="p-3 text-muted-foreground">{c.jobTitle || '—'}</td>
+                        <td className="p-3">
+                          <ContactEmailStatusLabel emailStatus={c.emailStatus} />
+                        </td>
+                        <td className="p-3">
+                          {c.verificationStatus ? (
+                            <StatusBadge status={c.verificationStatus} />
+                          ) : c.isValid ? (
+                            <span className="text-xs text-green-600">✓ valid</span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-xs text-red-500" title={c.validationErrors?.join(', ')}>
+                              <AlertCircle className="h-3 w-3" /> invalid
+                            </span>
+                          )}
+                        </td>
+                        <td className="max-w-[120px] p-3 text-xs text-muted-foreground">
+                          {Array.isArray(c.tags) && c.tags.length ? (
+                            <span className="line-clamp-2" title={c.tags.join(', ')}>
+                              {c.tags.join(', ')}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="p-3 text-center">
+                          {c.linkedin ? (
+                            <a
+                              href={c.linkedin}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex justify-center text-[#0077b5] hover:underline"
+                              title={c.linkedin}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <Linkedin className="h-4 w-4" />
+                            </a>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                  {!contactsLoading && contacts.length === 0 && (
+                    <tr>
+                      <td colSpan={9} className="py-12 text-center text-muted-foreground">
                         No contacts match your filters
                       </td>
                     </tr>
@@ -603,6 +843,32 @@ export default function NewCampaignPage() {
                 </tbody>
               </table>
             </div>
+
+            {contactsTotalPages > 1 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+                <p className="text-sm text-muted-foreground">
+                  Page {recipientPage} of {contactsTotalPages}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={recipientPage <= 1 || contactsLoading}
+                    onClick={() => setRecipientPage((p) => Math.max(1, p - 1))}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={recipientPage >= contactsTotalPages || contactsLoading}
+                    onClick={() => setRecipientPage((p) => p + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -802,8 +1068,91 @@ export default function NewCampaignPage() {
         </div>
       )}
 
-      {/* ── STEP 2: Template Routing (routing mode) ─────────────────────────── */}
-      {step === 2 && campaignMode === 'routing' && (
+      {/* ── STEP 2: Personalization ───────────────────────────────────────────── */}
+      {step === 2 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <PenLine className="h-4 w-4" />
+              Personalization
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Adjust first names for this campaign only (e.g. bad CSV data). Contact records in your database are not updated.
+              Open LinkedIn when you need to double-check a contact before sending.
+            </p>
+            <div className="max-h-[min(360px,50vh)] overflow-y-auto rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 border-b bg-muted/80 backdrop-blur-sm">
+                  <tr>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Email</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">LinkedIn</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">First name (in email)</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Stored value</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {[...selectedIds].map((id) => {
+                    const c = contacts.find((x: any) => x.id === id);
+                    if (!c) return null;
+                    const linkedinUrl = (c.linkedin as string | null | undefined)?.trim() || null;
+                    const orig = c.firstName ?? '';
+                    const val = firstNameOverrides[id] !== undefined ? firstNameOverrides[id]! : orig;
+                    const changed = firstNameOverrides[id] !== undefined && firstNameOverrides[id] !== orig;
+                    return (
+                      <tr key={id}>
+                        <td className="p-3 text-xs text-muted-foreground max-w-[200px] truncate" title={c.email}>{c.email}</td>
+                        <td className="p-3 align-middle">
+                          {linkedinUrl ? (
+                            <a
+                              href={linkedinUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex max-w-[min(200px,28vw)] items-center gap-1 truncate text-xs font-medium text-[#0077b5] hover:underline"
+                              title={linkedinUrl}
+                            >
+                              <Linkedin className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">LinkedIn</span>
+                            </a>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="p-3 min-w-[140px]">
+                          <Input
+                            className="h-8 text-sm"
+                            value={val}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setFirstNameOverrides((prev) => {
+                                const next = { ...prev };
+                                if (v === (c.firstName ?? '')) delete next[id];
+                                else next[id] = v;
+                                return next;
+                              });
+                            }}
+                          />
+                        </td>
+                        <td className="p-3 text-xs text-muted-foreground">
+                          {changed ? (
+                            <span className="line-through opacity-70">{orig || '—'}</span>
+                          ) : (
+                            <span>{orig || '—'}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── STEP 3: Template Routing (routing mode) ─────────────────────────── */}
+      {step === 3 && campaignMode === 'routing' && (
         <div className="space-y-5">
           {/* Fallback template + re-run */}
           <Card>
@@ -914,6 +1263,7 @@ export default function NewCampaignPage() {
                               <th className="p-3 text-left font-medium text-muted-foreground">Contact</th>
                               <th className="p-3 text-left font-medium text-muted-foreground">Job Title</th>
                               <th className="p-3 text-left font-medium text-muted-foreground">Assign Template</th>
+                              <th className="p-3 text-left font-medium text-muted-foreground w-[120px]">Routing</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y">
@@ -938,6 +1288,39 @@ export default function NewCampaignPage() {
                                       ))}
                                     </SelectContent>
                                   </Select>
+                                </td>
+                                <td className="p-3">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 text-xs gap-1"
+                                    disabled={templates.length === 0 || existingRoutingCategoryNames.length === 0}
+                                    title={
+                                      existingRoutingCategoryNames.length === 0
+                                        ? 'Add at least one routing rule with a category on the Routing Rules page'
+                                        : templates.length === 0
+                                          ? 'Create a template first'
+                                          : undefined
+                                    }
+                                    onClick={() => {
+                                      const rules = routingRules as any[];
+                                      let defaultCat = existingRoutingCategoryNames[0] || '';
+                                      if (a.assignedTemplateId) {
+                                        const match = rules.find((r) => r.templateId === a.assignedTemplateId);
+                                        if (match?.categoryName && existingRoutingCategoryNames.includes(match.categoryName)) {
+                                          defaultCat = match.categoryName;
+                                        }
+                                      }
+                                      setQuickRuleKeyword(a.jobTitle?.trim() || '');
+                                      setQuickRuleMatch('contains');
+                                      setQuickRuleCategoryName(defaultCat);
+                                      setQuickRuleDialogOpen(true);
+                                    }}
+                                  >
+                                    <Wand2 className="h-3 w-3" />
+                                    Add rule
+                                  </Button>
                                 </td>
                               </tr>
                             ))}
@@ -1070,8 +1453,8 @@ export default function NewCampaignPage() {
         </div>
       )}
 
-      {/* ── STEP 2: Template & Schedule (single mode) ───────────────────────── */}
-      {step === 2 && campaignMode === 'single' && (
+      {/* ── STEP 3: Template & Schedule (single mode) ───────────────────────── */}
+      {step === 3 && campaignMode === 'single' && (
         <div className="space-y-5">
           <Card>
             <CardHeader className="pb-3">
@@ -1215,8 +1598,8 @@ export default function NewCampaignPage() {
         </div>
       )}
 
-      {/* ── STEP 3: Review ─────────────────────────────────────────────────── */}
-      {step === 3 && (
+      {/* ── STEP 4: Review ─────────────────────────────────────────────────── */}
+      {step === 4 && (
         <div className="space-y-4">
           <Card>
             <CardContent className="p-6">
@@ -1238,6 +1621,14 @@ export default function NewCampaignPage() {
                   <dt className="text-muted-foreground">Recipients</dt>
                   <dd className="font-semibold">{selectedIds.size} contacts</dd>
                 </div>
+                {personalizationOverrideCount > 0 && (
+                  <div className="flex justify-between border-b pb-3">
+                    <dt className="text-muted-foreground">First name overrides</dt>
+                    <dd className="font-medium text-amber-700">
+                      {personalizationOverrideCount} contact{personalizationOverrideCount !== 1 ? 's' : ''} (send only)
+                    </dd>
+                  </div>
+                )}
                 {!genderSkipped && (maleCount > 0 || femaleCount > 0) ? (
                   <div className="flex justify-between border-b pb-3">
                     <dt className="text-muted-foreground">Gender split</dt>
@@ -1297,17 +1688,110 @@ export default function NewCampaignPage() {
                   </dd>
                 </div>
               </dl>
+              {sendingLimits && (
+                <div className="mt-4 rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  <p className="font-medium text-foreground">Staggered delivery</p>
+                  <p className="mt-1">
+                    First message goes at the time above; additional messages follow with automatic spacing (~
+                    {Math.round((sendingLimits.minStaggerIntervalMs ?? 0) / 1000)}s minimum between sends, plus jitter) so your
+                    account does not fire hundreds of emails in the same instant. Daily total across campaigns is capped at{' '}
+                    {sendingLimits.maxEmailsPerDay} (UTC).
+                  </p>
+                </div>
+              )}
             </CardContent>
           </Card>
 
           {sendMutation.isError && (
             <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4" />
-              {(sendMutation.error as any)?.response?.data?.message || 'Failed to create campaign'}
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              {formatCampaignCreateError(sendMutation.error)}
             </div>
           )}
         </div>
       )}
+
+      <Dialog open={quickRuleDialogOpen} onOpenChange={(o) => { if (!o) setQuickRuleDialogOpen(false); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add to existing category</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-xs text-muted-foreground">
+              Merges the keyword into your existing routing rule for that category (same template, no duplicate category rows). Matching re-runs for this campaign.
+            </p>
+            <div className="space-y-1.5">
+              <Label>Match type</Label>
+              <Select value={quickRuleMatch} onValueChange={(v) => setQuickRuleMatch(v as 'contains' | 'exact')}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="contains">Partial — title contains keyword(s)</SelectItem>
+                  <SelectItem value="exact">Exact — full job title</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Keyword or phrase</Label>
+              <Input
+                value={quickRuleKeyword}
+                onChange={(e) => setQuickRuleKeyword(e.target.value)}
+                placeholder={quickRuleMatch === 'contains' ? 'e.g. Manager or VP, Director' : 'e.g. Department Manager'}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {quickRuleMatch === 'contains'
+                  ? 'Comma-separated tokens match if the title contains any of them.'
+                  : 'The whole title must match this phrase (ignoring case).'}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Category</Label>
+              <Select value={quickRuleCategoryName || undefined} onValueChange={setQuickRuleCategoryName}>
+                <SelectTrigger><SelectValue placeholder="Choose a category" /></SelectTrigger>
+                <SelectContent>
+                  {existingRoutingCategoryNames.map((name) => (
+                    <SelectItem key={name} value={name}>{name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                Only categories you already use in Routing Rules appear here.
+              </p>
+            </div>
+            {quickRuleCategoryName && (
+              <div className="rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+                <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Template for this category</p>
+                {quickRuleResolvedTemplateName ? (
+                  <p className="font-medium mt-0.5">{quickRuleResolvedTemplateName}</p>
+                ) : (
+                  <p className="text-xs text-amber-700 mt-0.5">
+                    No template found on existing rules in this category. Assign a template on the Routing Rules page first.
+                  </p>
+                )}
+              </div>
+            )}
+            {applyQuickRuleMutation.isError && (
+              <p className="text-xs text-destructive">
+                {(applyQuickRuleMutation.error as Error)?.message || 'Could not save rule'}
+              </p>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setQuickRuleDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => applyQuickRuleMutation.mutate()}
+              disabled={
+                applyQuickRuleMutation.isPending
+                || !quickRuleKeyword.trim()
+                || !quickRuleCategoryName
+                || !quickRuleResolvedTemplateId
+              }
+            >
+              {applyQuickRuleMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save &amp; apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Navigation */}
       <div className="flex items-center justify-between pt-2">
@@ -1322,7 +1806,12 @@ export default function NewCampaignPage() {
             <ChevronRight className="ml-2 h-4 w-4" />
           </Button>
         ) : (
-          <Button onClick={handleSend} disabled={sendMutation.isPending} size="lg">
+          <Button
+            onClick={handleSend}
+            disabled={sendMutation.isPending || overRecipientLimit}
+            size="lg"
+            title={overRecipientLimit ? 'Reduce recipients to stay within the per-campaign limit' : undefined}
+          >
             {sendMutation.isPending ? (
               <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>
             ) : scheduledAt ? (

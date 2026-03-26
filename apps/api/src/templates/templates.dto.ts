@@ -39,6 +39,11 @@ export class UpdateTemplateDto {
 
 export class PreviewTemplateDto {
   @ApiProperty() @IsString() contactId: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() gender?: string;
+  @ApiPropertyOptional() @IsOptional() @IsObject() variableOverrides?: Record<string, string>;
+  @ApiPropertyOptional() @IsOptional() @IsString() customSubject?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() customBodyHtml?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() customBodyText?: string;
 }
 
 export class CreateCategoryDto {
@@ -62,4 +67,5 @@ export class SendToContactDto {
   @ApiPropertyOptional() @IsOptional() @IsString() customSubject?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() customBodyHtml?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() customBodyText?: string;
+  @ApiPropertyOptional() @IsOptional() @IsObject() variableOverrides?: Record<string, string>;
 }

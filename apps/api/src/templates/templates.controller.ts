@@ -68,7 +68,7 @@ export class TemplatesController {
 
   @Post(':id/preview')
   preview(@Param('id') id: string, @Body() dto: PreviewTemplateDto, @Request() req) {
-    return this.templatesService.preview(id, dto.contactId, req.user.sub);
+    return this.templatesService.preview(id, dto, req.user.sub);
   }
 
   @Post('test-email')

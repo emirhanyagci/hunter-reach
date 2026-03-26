@@ -4,7 +4,8 @@ import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { TemplateRendererService } from './template-renderer.service';
 import { EmailService } from '../email/email.service';
-import { CreateTemplateDto, UpdateTemplateDto, CreateCategoryDto, SendTestEmailDto, SendToContactDto } from './templates.dto';
+import { CreateTemplateDto, UpdateTemplateDto, CreateCategoryDto, SendTestEmailDto, SendToContactDto, PreviewTemplateDto } from './templates.dto';
+import { mergeTemplateContext } from './template-merge-context';
 
 const INCLUDE_ATTACHMENTS = { attachments: true, category: true } as const;
 
@@ -174,15 +175,7 @@ export class TemplatesService {
     if (dto.contactId) {
       const contact = await this.prisma.contact.findFirst({ where: { id: dto.contactId, userId } });
       if (contact) {
-        ctx = {
-          ...contact,
-          first_name: contact.firstName,
-          last_name: contact.lastName,
-          job_title: contact.jobTitle,
-          phone_number: contact.phoneNumber,
-          verification_status: contact.verificationStatus,
-          ...(typeof contact.extraFields === 'object' ? contact.extraFields as object : {}),
-        };
+        ctx = mergeTemplateContext(contact, undefined);
       }
     }
 
@@ -249,15 +242,7 @@ export class TemplatesService {
     if (dto.customBodyHtml) bodyHtml = dto.customBodyHtml;
     if (dto.customBodyText) bodyText = dto.customBodyText ?? null;
 
-    const ctx = {
-      ...contact,
-      first_name: contact.firstName,
-      last_name: contact.lastName,
-      job_title: contact.jobTitle,
-      phone_number: contact.phoneNumber,
-      verification_status: contact.verificationStatus,
-      ...(typeof contact.extraFields === 'object' ? (contact.extraFields as object) : {}),
-    };
+    const ctx = mergeTemplateContext(contact, dto.variableOverrides);
 
     const renderedSubject = this.renderer.render(subject, ctx as any);
     const renderedHtml = this.renderer.render(bodyHtml, ctx as any);
@@ -279,24 +264,35 @@ export class TemplatesService {
     return { success: true, sentTo: contact.email, renderedSubject };
   }
 
-  async preview(templateId: string, contactId: string, userId: string) {
+  async preview(templateId: string, dto: PreviewTemplateDto, userId: string) {
     const template = await this.findOne(templateId, userId);
-    const contact = await this.prisma.contact.findFirst({ where: { id: contactId, userId } });
+    const contact = await this.prisma.contact.findFirst({ where: { id: dto.contactId, userId } });
     if (!contact) throw new NotFoundException('Contact not found');
 
-    const ctx = {
-      ...contact,
-      first_name: contact.firstName,
-      last_name: contact.lastName,
-      job_title: contact.jobTitle,
-      phone_number: contact.phoneNumber,
-      verification_status: contact.verificationStatus,
-    };
+    let subject = template.subject;
+    let bodyHtml = template.bodyHtml;
+    let bodyText = template.bodyText;
+
+    if (dto.gender === 'male') {
+      subject = template.maleSubject || template.subject;
+      bodyHtml = template.maleBodyHtml || template.bodyHtml;
+      bodyText = template.maleBodyText || template.bodyText;
+    } else if (dto.gender === 'female') {
+      subject = template.femaleSubject || template.subject;
+      bodyHtml = template.femaleBodyHtml || template.bodyHtml;
+      bodyText = template.femaleBodyText || template.bodyText;
+    }
+
+    if (dto.customSubject) subject = dto.customSubject;
+    if (dto.customBodyHtml) bodyHtml = dto.customBodyHtml;
+    if (dto.customBodyText !== undefined) bodyText = dto.customBodyText ?? null;
+
+    const ctx = mergeTemplateContext(contact, dto.variableOverrides);
 
     return {
-      subject: this.renderer.render(template.subject, ctx as any),
-      bodyHtml: this.renderer.render(template.bodyHtml, ctx as any),
-      bodyText: template.bodyText ? this.renderer.render(template.bodyText, ctx as any) : null,
+      subject: this.renderer.render(subject, ctx as any),
+      bodyHtml: this.renderer.render(bodyHtml, ctx as any),
+      bodyText: bodyText ? this.renderer.render(bodyText, ctx as any) : null,
     };
   }
 }

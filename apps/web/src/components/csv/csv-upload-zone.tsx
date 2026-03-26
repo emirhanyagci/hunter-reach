@@ -10,7 +10,8 @@ interface UploadResult {
   importId: string;
   filename: string;
   totalRows: number;
-  validRows: number;
+  addedRows: number;
+  duplicatesSkipped: number;
   invalidRows: number;
   columnNames: string[];
 }
@@ -54,24 +55,35 @@ export function CsvUploadZone({ onSuccess }: CsvUploadZoneProps) {
     return (
       <div className="rounded-xl border-2 border-green-200 bg-green-50 p-8 text-center dark:border-green-800 dark:bg-green-950">
         <CheckCircle2 className="mx-auto mb-3 h-12 w-12 text-green-500" />
-        <h3 className="text-lg font-semibold text-green-800 dark:text-green-200">Import Successful!</h3>
+        <h3 className="text-lg font-semibold text-green-800 dark:text-green-200">Import Complete</h3>
         <p className="mt-1 text-sm text-green-700 dark:text-green-300">{result.filename}</p>
         <div className="mt-4 flex justify-center gap-6 text-sm">
           <div className="text-center">
-            <p className="text-2xl font-bold text-green-800 dark:text-green-200">{result.totalRows}</p>
-            <p className="text-green-600 dark:text-green-400">Total rows</p>
+            <p className="text-2xl font-bold text-green-800 dark:text-green-200">{result.addedRows}</p>
+            <p className="text-green-600 dark:text-green-400">Added</p>
           </div>
-          <div className="text-center">
-            <p className="text-2xl font-bold text-green-800 dark:text-green-200">{result.validRows}</p>
-            <p className="text-green-600 dark:text-green-400">Valid</p>
-          </div>
+          {result.duplicatesSkipped > 0 && (
+            <div className="text-center">
+              <p className="text-2xl font-bold text-amber-600">{result.duplicatesSkipped}</p>
+              <p className="text-amber-500">Duplicates skipped</p>
+            </div>
+          )}
           {result.invalidRows > 0 && (
             <div className="text-center">
               <p className="text-2xl font-bold text-red-600">{result.invalidRows}</p>
-              <p className="text-red-500">Invalid</p>
+              <p className="text-red-500">Invalid rows</p>
             </div>
           )}
+          <div className="text-center">
+            <p className="text-2xl font-bold text-muted-foreground">{result.totalRows}</p>
+            <p className="text-muted-foreground">Total rows</p>
+          </div>
         </div>
+        {result.duplicatesSkipped > 0 && (
+          <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
+            {result.duplicatesSkipped} contact{result.duplicatesSkipped !== 1 ? 's' : ''} already existed and were not re-added.
+          </p>
+        )}
         <Button
           variant="outline"
           size="sm"

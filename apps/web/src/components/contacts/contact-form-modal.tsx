@@ -104,9 +104,11 @@ export function ContactFormModal({ open, onOpenChange, contact }: ContactFormMod
 
   const onSubmit = handleSubmit((values) => mutation.mutate(values));
 
+  const apiError = (mutation.error as any)?.response?.data?.message;
+  const isDuplicateError =
+    (mutation.error as any)?.response?.status === 409;
   const errorMessage =
-    (mutation.error as any)?.response?.data?.message ||
-    (mutation.isError ? 'Something went wrong. Please try again.' : null);
+    apiError || (mutation.isError ? 'Something went wrong. Please try again.' : null);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -199,9 +201,13 @@ export function ContactFormModal({ open, onOpenChange, contact }: ContactFormMod
           </div>
 
           {errorMessage && (
-            <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4 shrink-0" />
-              {Array.isArray(errorMessage) ? errorMessage.join(', ') : errorMessage}
+            <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+              isDuplicateError
+                ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200'
+                : 'border-destructive/30 bg-destructive/10 text-destructive'
+            }`}>
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{Array.isArray(errorMessage) ? errorMessage.join(', ') : errorMessage}</span>
             </div>
           )}
 

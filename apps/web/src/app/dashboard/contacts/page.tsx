@@ -5,33 +5,28 @@ import { contactsApi } from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { StatusBadge } from '@/components/email-jobs/status-badge';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Search, Trash2, Users, AlertCircle, Linkedin, Mail, UserPlus, Pencil, History, MessageSquare, Calendar, Clock } from 'lucide-react';
+import { Trash2, Users, AlertCircle, Linkedin, Mail, UserPlus, Pencil, History } from 'lucide-react';
 import { useSearchParams } from 'next/navigation';
 import { formatDate } from '@/lib/utils';
 import Link from 'next/link';
 import { SendEmailModal } from '@/components/contacts/send-email-modal';
 import { ContactFormModal } from '@/components/contacts/contact-form-modal';
 import { ContactActivityModal } from '@/components/contacts/contact-activity-modal';
-
-const EMAIL_STATUS_CONFIG = {
-  never_contacted: { label: 'Never contacted', icon: Clock, color: 'text-muted-foreground', dot: 'bg-muted-foreground/40' },
-  scheduled: { label: 'Scheduled', icon: Calendar, color: 'text-blue-600', dot: 'bg-blue-500' },
-  sent: { label: 'Sent', icon: Mail, color: 'text-orange-600', dot: 'bg-orange-500' },
-  replied: { label: 'Replied', icon: MessageSquare, color: 'text-green-600', dot: 'bg-green-500' },
-} as const;
+import {
+  ContactsFiltersBar,
+  clearContactsFilters,
+  contactsFiltersToQueryParams,
+  type ContactsFilterFields,
+} from '@/components/contacts/contacts-filters-bar';
+import { ContactEmailStatusLabel } from '@/lib/contact-email-status';
 
 function ContactsContent() {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
 
-  const [search, setSearch] = useState('');
-  const [jobTitle, setJobTitle] = useState('');
-  const [company, setCompany] = useState('');
-  const [verificationStatus, setVerificationStatus] = useState('');
+  const [filters, setFilters] = useState<ContactsFilterFields>(() => clearContactsFilters());
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [sendEmailContact, setSendEmailContact] = useState<any>(null);
@@ -42,9 +37,14 @@ function ContactsContent() {
   const importId = searchParams.get('importId');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['contacts', { search, jobTitle, company, verificationStatus, page, importId }],
-    queryFn: () => contactsApi.getAll({ search, jobTitle, company, verificationStatus, page, limit: 50, importId }),
+    queryKey: ['contacts', contactsFiltersToQueryParams(filters, { page, limit: 50, importId })],
+    queryFn: () => contactsApi.getAll(contactsFiltersToQueryParams(filters, { page, limit: 50, importId })),
   });
+
+  const handleFiltersChange = useCallback((next: ContactsFilterFields) => {
+    setFilters(next);
+    setPage(1);
+  }, []);
 
   const deleteMutation = useMutation({
     mutationFn: (ids: string[]) => contactsApi.bulkDelete(ids),
@@ -104,52 +104,7 @@ function ContactsContent() {
         }
       />
 
-      {/* Filters */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-wrap gap-3">
-            <div className="relative flex-1 min-w-48">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search email, name, company..."
-                value={search}
-                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-                className="pl-9"
-              />
-            </div>
-            <Input
-              placeholder="Job title filter"
-              value={jobTitle}
-              onChange={(e) => { setJobTitle(e.target.value); setPage(1); }}
-              className="w-48"
-            />
-            <Input
-              placeholder="Company filter"
-              value={company}
-              onChange={(e) => { setCompany(e.target.value); setPage(1); }}
-              className="w-48"
-            />
-            <Select value={verificationStatus} onValueChange={(v) => { setVerificationStatus(v === 'all' ? '' : v); setPage(1); }}>
-              <SelectTrigger className="w-44">
-                <SelectValue placeholder="Verification status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All statuses</SelectItem>
-                <SelectItem value="valid">Valid</SelectItem>
-                <SelectItem value="invalid">Invalid</SelectItem>
-                <SelectItem value="accept_all">Accept all</SelectItem>
-                <SelectItem value="webmail">Webmail</SelectItem>
-                <SelectItem value="unknown">Unknown</SelectItem>
-              </SelectContent>
-            </Select>
-            {(search || jobTitle || company || verificationStatus) && (
-              <Button variant="ghost" size="sm" onClick={() => { setSearch(''); setJobTitle(''); setCompany(''); setVerificationStatus(''); setPage(1); }}>
-                Clear filters
-              </Button>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      <ContactsFiltersBar value={filters} onFiltersChange={handleFiltersChange} />
 
       {/* Table */}
       <Card>
@@ -219,22 +174,10 @@ function ContactsContent() {
                       <td className="p-4 text-muted-foreground">{contact.company || '—'}</td>
                       <td className="p-4 text-muted-foreground">{contact.jobTitle || '—'}</td>
                       <td className="p-4">
-                        {(() => {
-                          const status = (contact.emailStatus ?? 'never_contacted') as keyof typeof EMAIL_STATUS_CONFIG;
-                          const cfg = EMAIL_STATUS_CONFIG[status];
-                          const Icon = cfg.icon;
-                          return (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setActivityContactId(contact.id); }}
-                              className={`inline-flex items-center gap-1.5 text-xs font-medium ${cfg.color} hover:underline`}
-                              title="View email history"
-                            >
-                              <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
-                              <Icon className="h-3 w-3" />
-                              {cfg.label}
-                            </button>
-                          );
-                        })()}
+                        <ContactEmailStatusLabel
+                          emailStatus={contact.emailStatus}
+                          onClick={(e) => { e.stopPropagation(); setActivityContactId(contact.id); }}
+                        />
                       </td>
                       <td className="p-4">
                         {contact.verificationStatus ? (

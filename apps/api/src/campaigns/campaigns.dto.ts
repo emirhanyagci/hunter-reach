@@ -44,6 +44,15 @@ export class CreateCampaignDto {
   @ValidateNested({ each: true })
   @Type(() => ContactTemplateAssignmentDto)
   contactTemplateAssignments?: ContactTemplateAssignmentDto[];
+
+  /**
+   * Per-contact template variable overrides (e.g. first_name) for this campaign only.
+   * Does not update stored contact records.
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  contactVariableOverrides?: Record<string, Record<string, string>>;
 }
 
 export class DetectGendersDto {

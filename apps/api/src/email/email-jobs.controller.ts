@@ -9,6 +9,7 @@ import {
   UseGuards,
   Request,
   BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { IsString, IsOptional, IsArray } from 'class-validator';
@@ -153,6 +154,20 @@ export class EmailJobsController {
     else if (hasScheduled) contactEmailStatus = 'scheduled';
 
     return { contact, jobs, emailStatus: contactEmailStatus };
+  }
+
+  /** Static path before @Get(':id') so "send-now" is never captured as an id. */
+  @Post('send-now/:id')
+  async sendNow(@Param('id') id: string, @Request() req) {
+    const job = await this.prisma.emailJob.findFirst({
+      where: { id, campaign: { userId: req.user.sub } },
+      select: { id: true, status: true },
+    });
+    if (!job) throw new NotFoundException('Email job not found');
+    if (job.status !== 'SCHEDULED') {
+      throw new BadRequestException('Only scheduled emails can be sent immediately');
+    }
+    return this.schedulerService.sendNow(id);
   }
 
   @Get(':id')

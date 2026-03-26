@@ -21,6 +21,12 @@ export class CampaignsController {
     return this.campaignsService.getStats(req.user.sub);
   }
 
+  /** Env-driven caps + today's usage (UTC) for UI hints and validation messaging. */
+  @Get('sending-limits')
+  sendingLimits(@Request() req) {
+    return this.campaignsService.getSendingLimits(req.user.sub);
+  }
+
   @Post('detect-genders')
   detectGenders(@Body() dto: DetectGendersDto, @Request() req) {
     return this.campaignsService.detectGenders(dto.contactIds, req.user.sub);

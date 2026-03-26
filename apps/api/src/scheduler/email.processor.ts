@@ -4,6 +4,7 @@ import { Job } from 'bull';
 import * as fs from 'fs';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
+import { getQueueConcurrencyFromEnv } from '../config/email-sending.config';
 
 @Processor('email-queue')
 export class EmailProcessor {
@@ -14,7 +15,7 @@ export class EmailProcessor {
     @Inject(forwardRef(() => EmailService)) private emailService: EmailService,
   ) {}
 
-  @Process('send-email')
+  @Process({ name: 'send-email', concurrency: getQueueConcurrencyFromEnv() })
   async handle(job: Job<{ emailJobId: string }>) {
     const { emailJobId } = job.data;
     this.logger.log(`Processing email job ${emailJobId}`);

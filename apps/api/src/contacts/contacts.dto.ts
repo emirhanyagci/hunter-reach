@@ -1,5 +1,5 @@
-import { IsOptional, IsString, IsNumber, IsArray, Min, IsEmail } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsOptional, IsString, IsNumber, IsArray, Min, IsEmail, IsIn, IsBoolean } from 'class-validator';
+import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ContactsFilterDto {
@@ -11,6 +11,24 @@ export class ContactsFilterDto {
   @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() scoreMin?: number;
   @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() scoreMax?: number;
   @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() tags?: string[];
+  /** Single tag: contact must include this tag (use for categories / labels). */
+  @ApiPropertyOptional() @IsOptional() @IsString() tag?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() gender?: string;
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === true || value === 'true') return true;
+    if (value === false || value === 'false') return false;
+    return undefined;
+  })
+  @IsBoolean()
+  hasLinkedin?: boolean;
+  @ApiPropertyOptional({
+    enum: ['never_contacted', 'scheduled', 'sent', 'replied', 'not_replied'],
+  })
+  @IsOptional()
+  @IsIn(['never_contacted', 'scheduled', 'sent', 'replied', 'not_replied'])
+  emailStatus?: 'never_contacted' | 'scheduled' | 'sent' | 'replied' | 'not_replied';
   @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() @Min(1) page?: number;
   @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() @Min(1) limit?: number;
 }

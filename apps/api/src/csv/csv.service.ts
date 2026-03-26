@@ -11,6 +11,7 @@ const KNOWN_FIELDS = [
 // After transformHeader (lowercase + underscores), map variant names to canonical field names.
 const FIELD_ALIASES: Record<string, string> = {
   title: 'job_title',
+  recommended_email: 'email',
   company_name: 'company',
   person_linkedin_url: 'linkedin',
 };
@@ -68,20 +69,49 @@ export class CsvService {
       },
     });
 
+    // Fetch emails the user already has so we can skip duplicates
+    const existingEmailRows = await this.prisma.contact.findMany({
+      where: { userId },
+      select: { email: true },
+    });
+    const existingEmails = new Set(existingEmailRows.map((r) => r.email));
+
     // Process rows
-    const contacts: Array<{
+    type ContactRow = {
       importId: string; userId: string; email: string; firstName: string | null;
       lastName: string | null; company: string | null; domain: string | null;
       jobTitle: string | null; score: number | null; verificationStatus: string | null;
       phoneNumber: string | null; twitter: string | null; linkedin: string | null;
       extraFields?: Record<string, string>; isValid: boolean; validationErrors: string[];
-    }> = [];
+    };
+
+    const validContacts: ContactRow[] = [];
+    let invalidRows = 0;
+    let duplicatesSkipped = 0;
+    const seenInFile = new Set<string>();
+
     for (const row of rows) {
       const errors: string[] = [];
-      const email = row.email?.trim() || '';
+      const rawEmail = row.email?.trim() || '';
+      const email = rawEmail.toLowerCase();
 
-      if (!email) errors.push('Missing email');
-      else if (!validateEmail(email)) errors.push('Invalid email format');
+      if (!email) {
+        errors.push('Missing email');
+      } else if (!validateEmail(email)) {
+        errors.push('Invalid email format');
+      }
+
+      if (errors.length > 0) {
+        invalidRows++;
+        continue;
+      }
+
+      // Skip duplicates: already in DB or seen earlier in this same file
+      if (existingEmails.has(email) || seenInFile.has(email)) {
+        duplicatesSkipped++;
+        continue;
+      }
+      seenInFile.add(email);
 
       const extraFields: Record<string, string> = {};
       for (const col of columnNames) {
@@ -90,7 +120,7 @@ export class CsvService {
         }
       }
 
-      contacts.push({
+      validContacts.push({
         importId: csvImport.id,
         userId,
         email,
@@ -105,28 +135,30 @@ export class CsvService {
         twitter: row.twitter?.trim() || null,
         linkedin: row.linkedin?.trim() || null,
         extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
-        isValid: errors.length === 0,
-        validationErrors: errors,
+        isValid: true,
+        validationErrors: [],
       });
     }
 
-    if (contacts.length > 0) {
-      await this.prisma.contact.createMany({ data: contacts });
+    if (validContacts.length > 0) {
+      await this.prisma.contact.createMany({ data: validContacts, skipDuplicates: true });
     }
 
     await this.prisma.csvImport.update({
       where: { id: csvImport.id },
-      data: { status: 'DONE' },
+      data: {
+        status: 'DONE',
+        rowCount: rows.length,
+      },
     });
-
-    const validCount = contacts.filter((c) => c.isValid).length;
 
     return {
       importId: csvImport.id,
       filename,
-      totalRows: contacts.length,
-      validRows: validCount,
-      invalidRows: contacts.length - validCount,
+      totalRows: rows.length,
+      addedRows: validContacts.length,
+      duplicatesSkipped,
+      invalidRows,
       columnNames,
     };
   }

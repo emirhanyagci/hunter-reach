@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateRoutingRuleDto, UpdateRoutingRuleDto, PreviewRoutingDto } from './routing-rules.dto';
 
@@ -27,11 +27,17 @@ export class RoutingRulesService {
   }
 
   async create(userId: string, dto: CreateRoutingRuleDto) {
+    const keywords = (dto.keywords ?? []).map((k) => k.trim()).filter(Boolean);
+    const exactPhrases = (dto.exactPhrases ?? []).map((k) => k.trim()).filter(Boolean);
+    if (!keywords.length && !exactPhrases.length) {
+      throw new BadRequestException('Add at least one keyword (contains) or exact job-title phrase');
+    }
     return this.prisma.routingRule.create({
       data: {
         userId,
         categoryName: dto.categoryName,
-        keywords: dto.keywords.map((k) => k.trim()).filter(Boolean),
+        keywords,
+        exactPhrases,
         templateId: dto.templateId ?? null,
         priority: dto.priority ?? 0,
       },
@@ -47,6 +53,9 @@ export class RoutingRulesService {
         ...(dto.categoryName !== undefined && { categoryName: dto.categoryName }),
         ...(dto.keywords !== undefined && {
           keywords: dto.keywords.map((k) => k.trim()).filter(Boolean),
+        }),
+        ...(dto.exactPhrases !== undefined && {
+          exactPhrases: dto.exactPhrases.map((k) => k.trim()).filter(Boolean),
         }),
         ...(dto.templateId !== undefined && { templateId: dto.templateId }),
         ...(dto.priority !== undefined && { priority: dto.priority }),
@@ -72,18 +81,26 @@ export class RoutingRulesService {
   // ── Core routing logic ───────────────────────────────────────────────────────
   resolveTemplateForJobTitle(
     jobTitle: string | null,
-    rules: { categoryName: string; keywords: string[]; templateId: string | null; priority: number }[],
+    rules: {
+      categoryName: string;
+      keywords: string[];
+      exactPhrases?: string[];
+      templateId: string | null;
+      priority: number;
+    }[],
   ): { templateId: string | null; categoryName: string | null } {
     if (!jobTitle) return { templateId: null, categoryName: null };
 
-    const lower = jobTitle.toLowerCase();
+    const lower = jobTitle.toLowerCase().trim();
 
     // Sort rules by priority descending so higher priority wins
     const sorted = [...rules].sort((a, b) => b.priority - a.priority);
 
     for (const rule of sorted) {
-      const matched = rule.keywords.some((kw) => lower.includes(kw.toLowerCase().trim()));
-      if (matched) {
+      const exactList = rule.exactPhrases ?? [];
+      const exactMatch = exactList.some((p) => lower === p.toLowerCase().trim());
+      const partialMatch = rule.keywords.some((kw) => lower.includes(kw.toLowerCase().trim()));
+      if (exactMatch || partialMatch) {
         return { templateId: rule.templateId, categoryName: rule.categoryName };
       }
     }

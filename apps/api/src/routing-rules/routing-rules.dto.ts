@@ -3,7 +3,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateRoutingRuleDto {
   @ApiProperty() @IsString() categoryName: string;
-  @ApiProperty({ type: [String] }) @IsArray() @IsString({ each: true }) keywords: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) keywords?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) exactPhrases?: string[];
   @ApiPropertyOptional() @IsOptional() @IsUUID() templateId?: string;
   @ApiPropertyOptional() @IsOptional() @IsInt() @Min(0) priority?: number;
 }
@@ -11,6 +12,7 @@ export class CreateRoutingRuleDto {
 export class UpdateRoutingRuleDto {
   @ApiPropertyOptional() @IsOptional() @IsString() categoryName?: string;
   @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) keywords?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) exactPhrases?: string[];
   @ApiPropertyOptional() @IsOptional() @IsUUID() templateId?: string;
   @ApiPropertyOptional() @IsOptional() @IsInt() @Min(0) priority?: number;
 }

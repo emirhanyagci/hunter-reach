@@ -415,6 +415,11 @@ export default function RoutingRulesPage() {
                           {kw}
                         </Badge>
                       ))}
+                      {(rule.exactPhrases ?? []).map((phrase: string) => (
+                        <Badge key={`exact:${phrase}`} variant="secondary" className="text-xs font-normal">
+                          = {phrase}
+                        </Badge>
+                      ))}
                     </div>
                   </div>
                   <div className="flex shrink-0 gap-1">

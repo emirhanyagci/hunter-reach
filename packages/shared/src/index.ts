@@ -117,10 +117,28 @@ export interface EmailJob {
   renderedBodyText?: string | null;
   status: EmailJobStatus;
   scheduledAt: string;
+  /** Present when the user used Send Now before the planned time. */
+  manualSendTriggeredAt?: string | null;
   sentAt?: string | null;
   providerMessageId?: string | null;
   errorMessage?: string | null;
   retryCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ── Company Notes ─────────────────────────────────────────────────────────────
+export interface CompanyNoteLink {
+  label: string;
+  url: string;
+}
+
+export interface CompanyNote {
+  id: string;
+  userId: string;
+  companyName: string;
+  content: string;
+  links: CompanyNoteLink[];
   createdAt: string;
   updatedAt: string;
 }

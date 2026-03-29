@@ -1,11 +1,14 @@
 import {
   Controller, Post, Get, Param, UseGuards, Request,
-  UseInterceptors, UploadedFile, ParseFilePipe, MaxFileSizeValidator,
+  UseInterceptors, UploadedFiles, BadRequestException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CsvService } from './csv.service';
+
+const MAX_CSV_BYTES = 10 * 1024 * 1024;
+const MAX_FILES_PER_UPLOAD = 25;
 
 @ApiTags('csv')
 @ApiBearerAuth()
@@ -16,13 +19,20 @@ export class CsvController {
 
   @Post('upload')
   @ApiConsumes('multipart/form-data')
-  @UseInterceptors(FileInterceptor('file'))
-  upload(
-    @UploadedFile(new ParseFilePipe({ validators: [new MaxFileSizeValidator({ maxSize: 10 * 1024 * 1024 })] }))
-    file: Express.Multer.File,
-    @Request() req,
-  ) {
-    return this.csvService.processUpload(req.user.sub, file.buffer, file.originalname);
+  @UseInterceptors(FilesInterceptor('files', MAX_FILES_PER_UPLOAD))
+  upload(@UploadedFiles() files: Express.Multer.File[], @Request() req) {
+    if (!files?.length) {
+      throw new BadRequestException('At least one CSV file is required');
+    }
+    for (const f of files) {
+      if (f.size > MAX_CSV_BYTES) {
+        throw new BadRequestException(`File exceeds 10MB limit: ${f.originalname}`);
+      }
+    }
+    return this.csvService.processUploads(
+      req.user.sub,
+      files.map((f) => ({ buffer: f.buffer, filename: f.originalname })),
+    );
   }
 
   @Get('imports')

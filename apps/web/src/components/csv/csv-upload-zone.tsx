@@ -9,6 +9,8 @@ import { Button } from '@/components/ui/button';
 interface UploadResult {
   importId: string;
   filename: string;
+  filenames: string[];
+  fileCount: number;
   totalRows: number;
   addedRows: number;
   duplicatesSkipped: number;
@@ -20,21 +22,22 @@ interface CsvUploadZoneProps {
   onSuccess?: (result: UploadResult) => void;
 }
 
+const MAX_FILES = 25;
+
 export function CsvUploadZone({ onSuccess }: CsvUploadZoneProps) {
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    const file = acceptedFiles[0];
-    if (!file) return;
+    if (!acceptedFiles.length) return;
 
     setUploading(true);
     setError(null);
     setResult(null);
 
     try {
-      const data = await csvApi.upload(file);
+      const data = await csvApi.upload(acceptedFiles);
       setResult(data);
       onSuccess?.(data);
     } catch (err: any) {
@@ -47,17 +50,32 @@ export function CsvUploadZone({ onSuccess }: CsvUploadZoneProps) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: { 'text/csv': ['.csv'], 'text/plain': ['.txt'] },
-    maxFiles: 1,
+    maxFiles: MAX_FILES,
     disabled: uploading,
   });
 
   if (result) {
+    const names = result.filenames?.length ? result.filenames : [result.filename];
+    const fileLabel =
+      result.fileCount > 1
+        ? `${result.fileCount} files`
+        : names[0] || result.filename;
+
     return (
       <div className="rounded-xl border-2 border-green-200 bg-green-50 p-8 text-center dark:border-green-800 dark:bg-green-950">
         <CheckCircle2 className="mx-auto mb-3 h-12 w-12 text-green-500" />
         <h3 className="text-lg font-semibold text-green-800 dark:text-green-200">Import Complete</h3>
-        <p className="mt-1 text-sm text-green-700 dark:text-green-300">{result.filename}</p>
-        <div className="mt-4 flex justify-center gap-6 text-sm">
+        <p className="mt-1 text-sm font-medium text-green-800 dark:text-green-200">{fileLabel}</p>
+        {result.fileCount > 1 && (
+          <ul className="mx-auto mt-2 max-h-28 max-w-md list-inside list-disc overflow-y-auto text-left text-xs text-green-700 dark:text-green-300">
+            {names.map((n, i) => (
+              <li key={`${i}-${n}`} className="truncate" title={n}>
+                {n}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-4 flex flex-wrap justify-center gap-6 text-sm">
           <div className="text-center">
             <p className="text-2xl font-bold text-green-800 dark:text-green-200">{result.addedRows}</p>
             <p className="text-green-600 dark:text-green-400">Added</p>
@@ -81,7 +99,8 @@ export function CsvUploadZone({ onSuccess }: CsvUploadZoneProps) {
         </div>
         {result.duplicatesSkipped > 0 && (
           <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
-            {result.duplicatesSkipped} contact{result.duplicatesSkipped !== 1 ? 's' : ''} already existed and were not re-added.
+            {result.duplicatesSkipped} row{result.duplicatesSkipped !== 1 ? 's' : ''} skipped (already in your contacts or
+            repeated across uploaded files).
           </p>
         )}
         <Button
@@ -90,7 +109,7 @@ export function CsvUploadZone({ onSuccess }: CsvUploadZoneProps) {
           className="mt-4"
           onClick={() => setResult(null)}
         >
-          Upload another file
+          Upload more CSVs
         </Button>
       </div>
     );
@@ -108,27 +127,28 @@ export function CsvUploadZone({ onSuccess }: CsvUploadZoneProps) {
           uploading && 'pointer-events-none opacity-70',
         )}
       >
-        <input {...getInputProps()} />
+        <input {...getInputProps({ multiple: true })} />
         {uploading ? (
           <>
             <Loader2 className="mb-4 h-12 w-12 animate-spin text-primary" />
-            <p className="text-lg font-medium">Parsing your CSV...</p>
+            <p className="text-lg font-medium">Parsing your CSV files...</p>
             <p className="mt-1 text-sm text-muted-foreground">This may take a moment for large files</p>
           </>
         ) : isDragActive ? (
           <>
             <Upload className="mb-4 h-12 w-12 text-primary" />
-            <p className="text-lg font-semibold text-primary">Drop it here!</p>
+            <p className="text-lg font-semibold text-primary">Drop them here</p>
+            <p className="mt-1 text-sm text-muted-foreground">Up to {MAX_FILES} files, 10MB each</p>
           </>
         ) : (
           <>
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
               <FileText className="h-8 w-8 text-primary" />
             </div>
-            <p className="text-lg font-semibold">Drop your Hunter.io CSV here</p>
-            <p className="mt-1 text-sm text-muted-foreground">or click to browse files</p>
+            <p className="text-lg font-semibold">Drop Hunter.io CSV files here</p>
+            <p className="mt-1 text-sm text-muted-foreground">or click to browse — select one or more files</p>
             <p className="mt-3 rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
-              .csv files up to 10MB
+              .csv files, up to {MAX_FILES} files × 10MB each
             </p>
           </>
         )}

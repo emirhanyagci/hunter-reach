@@ -67,7 +67,9 @@ export default function ImportsPage() {
                       <FileText className="h-4 w-4 text-primary" />
                     </div>
                     <div>
-                      <p className="text-sm font-medium">{imp.filename}</p>
+                      <p className="break-words text-sm font-medium" title={imp.filename}>
+                        {imp.filename}
+                      </p>
                       <p className="text-xs text-muted-foreground">{formatDate(imp.createdAt)}</p>
                     </div>
                   </div>
@@ -88,7 +90,7 @@ export default function ImportsPage() {
             ))}
             {!isLoading && !imports?.length && (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                No imports yet. Upload a CSV above.
+                No imports yet. Upload one or more CSVs above.
               </p>
             )}
           </CardContent>

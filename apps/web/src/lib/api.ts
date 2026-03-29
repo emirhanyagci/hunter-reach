@@ -37,9 +37,11 @@ export const authApi = {
 
 // ── CSV ────────────────────────────────────────────────────────────────────────
 export const csvApi = {
-  upload: (file: File) => {
+  upload: (files: File[]) => {
     const form = new FormData();
-    form.append('file', file);
+    for (const f of files) {
+      form.append('files', f);
+    }
     return api.post('/csv/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } }).then((r) => r.data);
   },
   getImports: () => api.get('/csv/imports').then((r) => r.data),

@@ -22,6 +22,8 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
+import { addDays } from 'date-fns';
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 import {
   ContactsFiltersBar,
   clearContactsFilters,
@@ -65,13 +67,56 @@ interface RoutingAssignment {
 type CampaignMode = 'single' | 'routing';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function getNextBusinessDay(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
-  d.setHours(8, 30, 0, 0);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T08:30`;
+/** Matches server / product default “morning send” shortcut (see scheduling UI). */
+const BUSINESS_SEND_START_HOUR = 8;
+const BUSINESS_SEND_START_MINUTE = 30;
+
+function pad2(n: number) {
+  return String(n).padStart(2, '0');
+}
+
+function ymdPlusCalendarDays(ymd: string, deltaDays: number): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const anchor = new Date(y, m - 1, d, 12, 0, 0, 0);
+  const next = addDays(anchor, deltaDays);
+  return `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+}
+
+function ymdToLocalParts(ymd: string): [number, number, number] {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return [y, m - 1, d];
+}
+
+/**
+ * Earliest upcoming weekday slot at BUSINESS_SEND_START in `timeZone`
+ * (same calendar day if still before that time on a weekday; otherwise next weekday).
+ */
+function getNextValidBusinessSendTime(timeZone: string): string {
+  const now = new Date();
+  const ymdNow = formatInTimeZone(now, timeZone, 'yyyy-MM-dd');
+  const isoDow = parseInt(formatInTimeZone(now, timeZone, 'i'), 10);
+  const h = parseInt(formatInTimeZone(now, timeZone, 'H'), 10);
+  const minute = parseInt(formatInTimeZone(now, timeZone, 'm'), 10);
+  const mins = h * 60 + minute;
+  const startMins = BUSINESS_SEND_START_HOUR * 60 + BUSINESS_SEND_START_MINUTE;
+
+  const isWeekend = isoDow === 6 || isoDow === 7;
+  if (!isWeekend && mins <= startMins) {
+    return `${ymdNow}T${pad2(BUSINESS_SEND_START_HOUR)}:${pad2(BUSINESS_SEND_START_MINUTE)}`;
+  }
+
+  let ymd = ymdPlusCalendarDays(ymdNow, 1);
+  for (let g = 0; g < 14; g++) {
+    const [yy, mm, dd] = ymdToLocalParts(ymd);
+    const noonInZone = fromZonedTime(new Date(yy, mm, dd, 12, 0, 0, 0), timeZone);
+    const dow = parseInt(formatInTimeZone(noonInZone, timeZone, 'i'), 10);
+    if (dow >= 1 && dow <= 5) {
+      return `${ymd}T${pad2(BUSINESS_SEND_START_HOUR)}:${pad2(BUSINESS_SEND_START_MINUTE)}`;
+    }
+    ymd = ymdPlusCalendarDays(ymd, 1);
+  }
+
+  throw new Error('Could not resolve next business send time');
 }
 
 function confidenceBadge(probability: number) {
@@ -199,6 +244,7 @@ export default function NewCampaignPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [scheduledAt, setScheduledAt] = useState('');
   const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const nextBusinessSendAt = getNextValidBusinessSendTime(timezone);
 
   // Routing mode state
   const [routingAssignments, setRoutingAssignments] = useState<RoutingAssignment[]>([]);
@@ -1413,20 +1459,23 @@ export default function NewCampaignPage() {
                   <div><p className="text-sm font-semibold">Send now</p><p className="text-xs text-muted-foreground">Immediately</p></div>
                 </button>
 
-                <button onClick={() => setScheduledAt(getNextBusinessDay())}
+                <button onClick={() => setScheduledAt(getNextValidBusinessSendTime(timezone))}
                   className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    scheduledAt === getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
-                  <div className={cn('rounded-lg p-1.5', scheduledAt === getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
-                    <Clock className={cn('h-4 w-4', scheduledAt === getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
+                    scheduledAt === nextBusinessSendAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', scheduledAt === nextBusinessSendAt ? 'bg-primary/10' : 'bg-muted')}>
+                    <Clock className={cn('h-4 w-4', scheduledAt === nextBusinessSendAt ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
-                  <div><p className="text-sm font-semibold">Next business day</p><p className="text-xs text-muted-foreground">8:30 AM</p></div>
+                  <div>
+                    <p className="text-sm font-semibold">Next business time</p>
+                    <p className="text-xs text-muted-foreground">Weekdays 8:30 AM</p>
+                  </div>
                 </button>
 
-                <button onClick={() => { if (!scheduledAt || scheduledAt === getNextBusinessDay()) setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16)); }}
+                <button onClick={() => { if (!scheduledAt || scheduledAt === nextBusinessSendAt) setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16)); }}
                   className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    scheduledAt && scheduledAt !== getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
-                  <div className={cn('rounded-lg p-1.5', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
-                    <Calendar className={cn('h-4 w-4', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
+                    scheduledAt && scheduledAt !== nextBusinessSendAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', scheduledAt && scheduledAt !== nextBusinessSendAt ? 'bg-primary/10' : 'bg-muted')}>
+                    <Calendar className={cn('h-4 w-4', scheduledAt && scheduledAt !== nextBusinessSendAt ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
                   <div><p className="text-sm font-semibold">Custom time</p><p className="text-xs text-muted-foreground">Pick date & time</p></div>
                 </button>
@@ -1558,20 +1607,23 @@ export default function NewCampaignPage() {
                   <div><p className="text-sm font-semibold">Send now</p><p className="text-xs text-muted-foreground">Immediately</p></div>
                 </button>
 
-                <button onClick={() => setScheduledAt(getNextBusinessDay())}
+                <button onClick={() => setScheduledAt(getNextValidBusinessSendTime(timezone))}
                   className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    scheduledAt === getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
-                  <div className={cn('rounded-lg p-1.5', scheduledAt === getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
-                    <Clock className={cn('h-4 w-4', scheduledAt === getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
+                    scheduledAt === nextBusinessSendAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', scheduledAt === nextBusinessSendAt ? 'bg-primary/10' : 'bg-muted')}>
+                    <Clock className={cn('h-4 w-4', scheduledAt === nextBusinessSendAt ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
-                  <div><p className="text-sm font-semibold">Next business day</p><p className="text-xs text-muted-foreground">8:30 AM</p></div>
+                  <div>
+                    <p className="text-sm font-semibold">Next business time</p>
+                    <p className="text-xs text-muted-foreground">Weekdays 8:30 AM</p>
+                  </div>
                 </button>
 
-                <button onClick={() => { if (!scheduledAt || scheduledAt === getNextBusinessDay()) setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16)); }}
+                <button onClick={() => { if (!scheduledAt || scheduledAt === nextBusinessSendAt) setScheduledAt(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16)); }}
                   className={cn('flex items-center gap-3 rounded-xl border p-3 text-left transition-all hover:shadow-sm',
-                    scheduledAt && scheduledAt !== getNextBusinessDay() ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
-                  <div className={cn('rounded-lg p-1.5', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'bg-primary/10' : 'bg-muted')}>
-                    <Calendar className={cn('h-4 w-4', scheduledAt && scheduledAt !== getNextBusinessDay() ? 'text-primary' : 'text-muted-foreground')} />
+                    scheduledAt && scheduledAt !== nextBusinessSendAt ? 'border-primary bg-primary/5' : 'hover:border-primary/40')}>
+                  <div className={cn('rounded-lg p-1.5', scheduledAt && scheduledAt !== nextBusinessSendAt ? 'bg-primary/10' : 'bg-muted')}>
+                    <Calendar className={cn('h-4 w-4', scheduledAt && scheduledAt !== nextBusinessSendAt ? 'text-primary' : 'text-muted-foreground')} />
                   </div>
                   <div><p className="text-sm font-semibold">Custom time</p><p className="text-xs text-muted-foreground">Pick date & time</p></div>
                 </button>

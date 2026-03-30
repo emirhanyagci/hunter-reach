@@ -14,7 +14,19 @@ import { EmailSendingPolicyService } from './email-sending-policy.service';
 import { mergeTemplateContext } from '../templates/template-merge-context';
 
 const GENDERIZE_BATCH_SIZE = 10;
+const GENDERIZE_REQUEST_TIMEOUT_MS = 8000;
+const GENDERIZE_RETRY_DELAY_MS = 2000;
 const GENDER_CONFIDENCE_THRESHOLD = 0.70;
+
+/** Stable key for dedupe + map lookup: trim, collapse spaces, strip BOM/ZWSP, NFC, Turkish lowercase. */
+function normalizeFirstNameKey(raw: string): string {
+  const collapsed = raw
+    .trim()
+    .replace(/[\uFEFF\u200B-\u200D]/g, '')
+    .replace(/\s+/g, ' ');
+  if (!collapsed) return '';
+  return collapsed.normalize('NFC').toLocaleLowerCase('tr-TR');
+}
 
 // Common Turkish male names
 const TR_MALE_NAMES = new Set([
@@ -29,7 +41,7 @@ const TR_MALE_NAMES = new Set([
   'serdar','serhat','seven','suat','süleyman','suleyman','tahsin','tarik','tarık','tayfun',
   'timur','tolga','tuncer','turgay','turgut','türker','turker','ugur','uğur','uluc','uluç',
   'umut','ufuk','veli','volkan','yalcin','yalçın','yavuz','yigit','yiğit','yilmaz','yılmaz',
-  'yuksel','yüksel','zafer','zeki','alp','alper','alpay','alphan','altan','altay','anil',
+  'yuksel','yüksel','zafer','zeki','efe','yusuf','alp','alper','alpay','alphan','altan','altay','anil',
   'anıl','arif','arman','arslan','asim','aşım','atakan','atalay','atilla','attila','aydin',
   'aydın','aykut','baris','barış','bahadir','bahadır','berk','berkay','bilal','bilge',
   'bilgehan','bulent','bülent','caner','cagatay','çağatay','celal','cengiz','cenk','cuneyt',
@@ -58,8 +70,8 @@ const TR_FEMALE_NAMES = new Set([
 ]);
 
 function lookupTurkishGender(firstName: string): { gender: 'male' | 'female'; probability: number } | null {
-  const name = firstName.trim().toLowerCase()
-    .replace(/İ/g, 'i').replace(/I/g, 'ı');
+  const name = normalizeFirstNameKey(firstName);
+  if (!name) return null;
   if (TR_MALE_NAMES.has(name)) return { gender: 'male', probability: 0.95 };
   if (TR_FEMALE_NAMES.has(name)) return { gender: 'female', probability: 0.95 };
   return null;
@@ -115,7 +127,7 @@ export class CampaignsService {
 
     const nameToContactIds = new Map<string, string[]>();
     for (const c of contacts) {
-      const name = c.firstName?.trim().toLowerCase();
+      const name = normalizeFirstNameKey(c.firstName ?? '');
       if (name) {
         if (!nameToContactIds.has(name)) nameToContactIds.set(name, []);
         nameToContactIds.get(name)!.push(c.id);
@@ -136,30 +148,146 @@ export class CampaignsService {
       }
     }
 
-    // Second pass: fetch remaining names from genderize.io with TR locale
-    for (let i = 0; i < namesToFetch.length; i += GENDERIZE_BATCH_SIZE) {
-      const batch = namesToFetch.slice(i, i + GENDERIZE_BATCH_SIZE);
-      try {
-        const params = batch.map((n, idx) => `name[${idx}]=${encodeURIComponent(n)}`).join('&');
-        const apiKey = process.env.GENDERIZE_API_KEY;
-        const baseUrl = `https://api.genderize.io/?${params}&country_id=TR`;
-        const url = apiKey ? `${baseUrl}&apikey=${apiKey}` : baseUrl;
+    const genderDetectDebug =
+      process.env.GENDER_DETECT_DEBUG === 'true' || process.env.GENDER_DETECT_DEBUG === '1';
 
-        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-        if (res.ok) {
-          const data = await res.json();
-          const results: any[] = Array.isArray(data) ? data : [data];
-          for (const r of results) {
-            if (r.gender && r.probability != null) {
-              genderByName.set(r.name.toLowerCase(), {
-                gender: r.gender as 'male' | 'female',
-                probability: r.probability,
-              });
-            }
+    const mergeGenderizeResults = (batch: string[], results: any[]) => {
+      if (results.length !== batch.length) {
+        this.logger.warn(
+          `genderize.io batch length mismatch: sent ${batch.length}, got ${results.length}`,
+        );
+      }
+      const n = Math.min(results.length, batch.length);
+      for (let idx = 0; idx < n; idx++) {
+        const r = results[idx];
+        const requestedKey = batch[idx];
+        if (genderDetectDebug) {
+          this.logger.log(
+            `genderize row[${idx}] normalizedInput=${JSON.stringify(requestedKey)} api.name=${JSON.stringify(r?.name)} gender=${r?.gender} probability=${r?.probability}`,
+          );
+        }
+        if (r?.gender && r.probability != null) {
+          const detection = {
+            gender: r.gender as 'male' | 'female',
+            probability: r.probability,
+          };
+          genderByName.set(requestedKey, detection);
+          const apiKeyNorm = r.name != null ? normalizeFirstNameKey(String(r.name)) : '';
+          if (apiKeyNorm && apiKeyNorm !== requestedKey) {
+            genderByName.set(apiKeyNorm, detection);
+          }
+        } else if (genderDetectDebug) {
+          this.logger.log(
+            `genderize no prediction for normalizedInput=${JSON.stringify(requestedKey)} (gender=${r?.gender}, count=${r?.count})`,
+          );
+        }
+      }
+    };
+
+    const fetchGenderizeBatch = async (
+      batch: string[],
+      countryId: string | null,
+      allowRetry429: boolean,
+      allowSplitOnLimit: boolean,
+    ): Promise<void> => {
+      if (batch.length === 0) return;
+
+      const params = batch.map((n, idx) => `name[${idx}]=${encodeURIComponent(n)}`).join('&');
+      const apiKey = process.env.GENDERIZE_API_KEY;
+      let baseUrl = `https://api.genderize.io/?${params}`;
+      if (countryId) baseUrl += `&country_id=${countryId}`;
+      const url = apiKey ? `${baseUrl}&apikey=${encodeURIComponent(apiKey)}` : baseUrl;
+
+      if (genderDetectDebug) {
+        this.logger.log(
+          `genderize request batchSize=${batch.length} countryId=${countryId ?? 'none'} names=${JSON.stringify(batch)}`,
+        );
+      }
+
+      const doFetch = () =>
+        fetch(url, { signal: AbortSignal.timeout(GENDERIZE_REQUEST_TIMEOUT_MS) });
+
+      try {
+        let res = await doFetch();
+        if (res.status === 429 && allowRetry429) {
+          await new Promise((r) => setTimeout(r, GENDERIZE_RETRY_DELAY_MS));
+          res = await doFetch();
+          if (genderDetectDebug) {
+            this.logger.log(`genderize retry after 429, status=${res.status}`);
           }
         }
+
+        const bodyText = await res.text();
+        if (!res.ok) {
+          this.logger.warn(
+            `genderize.io HTTP ${res.status} (countryId=${countryId ?? 'none'}): ${bodyText.slice(0, 500)}`,
+          );
+          if (
+            allowSplitOnLimit &&
+            batch.length > 1 &&
+            (res.status === 429 || /limit/i.test(bodyText))
+          ) {
+            const mid = Math.ceil(batch.length / 2);
+            await fetchGenderizeBatch(batch.slice(0, mid), countryId, false, true);
+            await new Promise((r) => setTimeout(r, 300));
+            await fetchGenderizeBatch(batch.slice(mid), countryId, false, true);
+          }
+          return;
+        }
+
+        let data: unknown;
+        try {
+          data = JSON.parse(bodyText);
+        } catch {
+          this.logger.warn(`genderize.io invalid JSON: ${bodyText.slice(0, 400)}`);
+          return;
+        }
+
+        if (genderDetectDebug) {
+          this.logger.log(`genderize raw response: ${bodyText.slice(0, 2500)}`);
+        }
+
+        if (data && typeof data === 'object' && !Array.isArray(data) && 'error' in data) {
+          const msg = String((data as { error?: string }).error ?? JSON.stringify(data));
+          this.logger.warn(`genderize.io error payload: ${msg}`);
+          if (allowSplitOnLimit && batch.length > 1 && /limit/i.test(msg)) {
+            const mid = Math.ceil(batch.length / 2);
+            await fetchGenderizeBatch(batch.slice(0, mid), countryId, false, true);
+            await new Promise((r) => setTimeout(r, 300));
+            await fetchGenderizeBatch(batch.slice(mid), countryId, false, true);
+          }
+          return;
+        }
+
+        const results: any[] = Array.isArray(data) ? data : [data];
+        mergeGenderizeResults(batch, results);
       } catch (err) {
-        this.logger.warn(`genderize.io batch ${i / GENDERIZE_BATCH_SIZE + 1} failed: ${err}`);
+        this.logger.warn(
+          `genderize.io request failed (countryId=${countryId ?? 'none'}, batchSize=${batch.length}): ${err}`,
+        );
+        if (allowRetry429) {
+          await new Promise((r) => setTimeout(r, GENDERIZE_RETRY_DELAY_MS));
+          await fetchGenderizeBatch(batch, countryId, false, allowSplitOnLimit);
+        }
+      }
+    };
+
+    // Second pass: genderize.io with TR (then global fallback for still-unknown names)
+    for (let i = 0; i < namesToFetch.length; i += GENDERIZE_BATCH_SIZE) {
+      const batch = namesToFetch.slice(i, i + GENDERIZE_BATCH_SIZE);
+      await fetchGenderizeBatch(batch, 'TR', true, true);
+    }
+
+    const stillMissing = namesToFetch.filter((n) => !genderByName.has(n));
+    if (stillMissing.length) {
+      if (genderDetectDebug) {
+        this.logger.log(
+          `genderize global fallback for ${stillMissing.length} name(s) still missing after TR`,
+        );
+      }
+      for (let i = 0; i < stillMissing.length; i += GENDERIZE_BATCH_SIZE) {
+        const batch = stillMissing.slice(i, i + GENDERIZE_BATCH_SIZE);
+        await fetchGenderizeBatch(batch, null, true, true);
       }
     }
 
@@ -167,7 +295,7 @@ export class CampaignsService {
 
     return contactIds.map((contactId) => {
       const contact = contactMap.get(contactId);
-      const name = contact?.firstName?.trim().toLowerCase();
+      const name = contact?.firstName ? normalizeFirstNameKey(contact.firstName) : '';
       const detection = name ? genderByName.get(name) : null;
 
       return {

@@ -1,8 +1,11 @@
 'use client';
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
-import { contactsApi, templatesApi, campaignsApi, routingRulesApi, type CampaignSendingLimits } from '@/lib/api';
+import {
+  contactsApi, templatesApi, campaignsApi, routingRulesApi,
+  type CampaignSendingLimits, getDetectGendersErrorMessage,
+} from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -16,7 +19,7 @@ import {
 } from '@/components/templates/visual-email-editor';
 import {
   Users, Calendar, Send, Loader2, ChevronRight, ChevronLeft,
-  CheckCircle2, AlertCircle, Clock, Zap,
+  CheckCircle2, AlertCircle, AlertTriangle, Clock, Zap,
   HelpCircle, SkipForward, Linkedin, Plus, GitBranch,
   FileText, RefreshCw, PenLine, Wand2,
 } from 'lucide-react';
@@ -25,6 +28,10 @@ import Link from 'next/link';
 import { addDays } from 'date-fns';
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 import {
+  ContactsTableToolbar,
+  type ContactPageSize,
+} from '@/components/contacts/contacts-table-toolbar';
+import {
   ContactsFiltersBar,
   clearContactsFilters,
   contactsFiltersToQueryParams,
@@ -32,6 +39,11 @@ import {
 } from '@/components/contacts/contacts-filters-bar';
 import { ContactEmailStatusLabel } from '@/lib/contact-email-status';
 import { StatusBadge } from '@/components/email-jobs/status-badge';
+
+/** Matches server-derived `emailStatus` on contacts (sent, scheduled/processing, or replied). */
+function contactHasPriorOutreach(emailStatus: string | undefined | null): boolean {
+  return (emailStatus ?? 'never_contacted') !== 'never_contacted';
+}
 
 function GenderMale({ className }: { className?: string }) {
   return <span className={cn('font-bold leading-none', className)}>♂</span>;
@@ -146,6 +158,93 @@ function getCategoryColor(name: string | null) {
   return CATEGORY_COLORS[name] ?? 'bg-muted text-muted-foreground border-border';
 }
 
+function parseBinaryGender(raw: unknown): 'male' | 'female' | null {
+  if (raw == null || typeof raw !== 'string') return null;
+  const t = raw.trim().toLowerCase();
+  if (t === 'male') return 'male';
+  if (t === 'female') return 'female';
+  return null;
+}
+
+/** Normalizes optional gender strings from imported contact rows (M/F, etc.). */
+function parseContactStoredGender(raw: string | null | undefined): 'male' | 'female' | null {
+  if (raw == null || typeof raw !== 'string') return null;
+  const t = raw.trim().toLowerCase();
+  if (t === 'male' || t === 'm' || t === 'man') return 'male';
+  if (t === 'female' || t === 'f' || t === 'woman') return 'female';
+  return null;
+}
+
+/** Read-only gender summary for personalization review (data from `genderStates`). */
+function PersonalizationGenderSummary({
+  state,
+  genderSkipped,
+  contactStoredGender,
+}: {
+  state: ContactGenderState | undefined;
+  genderSkipped: boolean;
+  contactStoredGender?: string | null;
+}) {
+  if (genderSkipped) {
+    return (
+      <span className="inline-flex rounded-md bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+        Default template
+      </span>
+    );
+  }
+
+  const assigned = parseBinaryGender(state?.assignedGender);
+  const detected = parseBinaryGender(state?.detectedGender);
+  const fromContact = parseContactStoredGender(contactStoredGender);
+  /** Template variant used for send: assigned wins; else detection; else CRM field (lookup only). */
+  const display = assigned ?? detected ?? fromContact;
+
+  if (!display) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+
+  const g = display;
+  const showConfidenceBadge =
+    !!state && state.autoAssigned && assigned && detected === assigned && state.probability > 0;
+  /** Extra line only when assigned row should show detection detail (avoid duplicating primary when display is detection-only). */
+  const showDetectedLine =
+    !!state &&
+    !!detected &&
+    !!assigned &&
+    (detected !== assigned || !state.autoAssigned);
+  const showManualLabel =
+    !!state && !state.detectedGender && !state.autoAssigned && !!assigned;
+  const showFromContactNote =
+    !!fromContact && display === fromContact && assigned == null && detected == null;
+
+  return (
+    <div className="space-y-0.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {g === 'male' ? (
+          <GenderMale className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+        ) : (
+          <GenderFemale className="h-3.5 w-3.5 shrink-0 text-pink-500" />
+        )}
+        <span className="capitalize text-xs font-medium">{g}</span>
+        {showConfidenceBadge ? confidenceBadge(state.probability) : null}
+      </div>
+      {showDetectedLine && state && (
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          Detected:{' '}
+          <span className="capitalize">{state.detectedGender}</span>
+          {state.probability > 0 ? ` · ${Math.round(state.probability * 100)}%` : null}
+        </p>
+      )}
+      {showManualLabel ? (
+        <p className="text-[11px] text-muted-foreground">Manual</p>
+      ) : null}
+      {showFromContactNote ? (
+        <p className="text-[11px] text-muted-foreground">From contact record</p>
+      ) : null}
+    </div>
+  );
+}
+
 function formatCampaignCreateError(err: unknown): string {
   const data = (err as { response?: { data?: { message?: unknown } } })?.response?.data;
   if (!data) return 'Failed to create campaign';
@@ -227,10 +326,12 @@ export default function NewCampaignPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [recipientFilters, setRecipientFilters] = useState<ContactsFilterFields>(() => clearContactsFilters());
   const [recipientPage, setRecipientPage] = useState(1);
+  const [recipientPageSize, setRecipientPageSize] = useState<ContactPageSize>(50);
 
   const handleRecipientFiltersChange = useCallback((next: ContactsFilterFields) => {
     setRecipientFilters(next);
     setRecipientPage(1);
+    setSelectedIds(new Set());
   }, []);
 
   // Step 1 — Gender Detection
@@ -239,6 +340,8 @@ export default function NewCampaignPage() {
   const [genderDetected, setGenderDetected] = useState(false);
   const [genderSkipped, setGenderSkipped] = useState(false);
   const [genderError, setGenderError] = useState<string | null>(null);
+  /** True when genderize.io stopped early (rate limit / quota / timeout on their side). */
+  const [genderLimitReached, setGenderLimitReached] = useState(false);
 
   // Step 2 — Template & Schedule (single mode) / Routing (routing mode)
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
@@ -265,10 +368,164 @@ export default function NewCampaignPage() {
   const [customBaseId, setCustomBaseId] = useState('');
   const [customForm, setCustomForm] = useState<EmailEditorValue>(emptyCustomForm);
 
-  const { data: contactsData, isLoading: contactsLoading } = useQuery({
-    queryKey: ['contacts-campaign', contactsFiltersToQueryParams(recipientFilters, { page: recipientPage, limit: 50 })],
-    queryFn: () => contactsApi.getAll(contactsFiltersToQueryParams(recipientFilters, { page: recipientPage, limit: 50 })),
+  const recipientListParams = useMemo(
+    () => contactsFiltersToQueryParams(recipientFilters, { page: recipientPage, limit: recipientPageSize }),
+    [recipientFilters, recipientPage, recipientPageSize],
+  );
+
+  const recipientFilterParamsBulk = useMemo(
+    () => contactsFiltersToQueryParams(recipientFilters),
+    [recipientFilters],
+  );
+
+  const { data: contactsData, isLoading: contactsLoading, dataUpdatedAt: contactsCampaignDataUpdatedAt } = useQuery({
+    queryKey: ['contacts-campaign', recipientListParams],
+    queryFn: () => contactsApi.getAll(recipientListParams),
   });
+
+  const selectedIdsKey = useMemo(() => [...selectedIds].sort().join(','), [selectedIds]);
+
+  const { data: selectedContactsBatch, isLoading: selectedContactsLoading } = useQuery({
+    queryKey: ['contacts-lookup', selectedIdsKey],
+    queryFn: () => contactsApi.lookupByIds([...selectedIds]),
+    enabled: selectedIds.size > 0,
+  });
+
+  const selectedById = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const c of selectedContactsBatch?.data ?? []) {
+      m.set(c.id, c);
+    }
+    return m;
+  }, [selectedContactsBatch]);
+
+  const selectionLookupComplete =
+    selectedIds.size === 0 ||
+    (!selectedContactsLoading &&
+      (selectedContactsBatch?.data?.length ?? 0) === selectedIds.size &&
+      [...selectedIds].every((id) => selectedById.has(id)));
+
+  const priorOutreachSelectedIds = useMemo(() => {
+    if (!selectionLookupComplete) return [];
+    const out: string[] = [];
+    for (const id of selectedIds) {
+      const c = selectedById.get(id);
+      if (c && contactHasPriorOutreach(c.emailStatus)) out.push(id);
+    }
+    return out;
+  }, [selectedIds, selectedById, selectionLookupComplete]);
+
+  const removePriorOutreachFromSelection = useCallback(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of priorOutreachSelectedIds) next.delete(id);
+      return next;
+    });
+  }, [priorOutreachSelectedIds]);
+
+  /** Keep batch lookup fresh when revisiting recipients or when the list refetches (edited contacts). */
+  const prevStepForLookupRef = useRef(step);
+  useEffect(() => {
+    const prev = prevStepForLookupRef.current;
+    prevStepForLookupRef.current = step;
+    if (selectedIds.size === 0) return;
+    if ((step === 0 && prev !== 0) || (prev === 0 && step === 1)) {
+      void queryClient.invalidateQueries({ queryKey: ['contacts-lookup', selectedIdsKey] });
+    }
+  }, [step, selectedIdsKey, selectedIds.size, queryClient]);
+
+  /** When the recipient list refetches (focus, filters, or cache invalidation), refresh selected-contact batch too. */
+  const prevContactsListUpdatedAtRef = useRef(0);
+  useEffect(() => {
+    if (selectedIds.size === 0) {
+      prevContactsListUpdatedAtRef.current = contactsCampaignDataUpdatedAt;
+      return;
+    }
+    const prevAt = prevContactsListUpdatedAtRef.current;
+    if (prevAt !== 0 && contactsCampaignDataUpdatedAt !== prevAt) {
+      void queryClient.invalidateQueries({ queryKey: ['contacts-lookup', selectedIdsKey] });
+    }
+    prevContactsListUpdatedAtRef.current = contactsCampaignDataUpdatedAt;
+  }, [selectedIdsKey, selectedIds.size, contactsCampaignDataUpdatedAt, queryClient]);
+
+  /** Bumped when selected recipient ids change; stale async gender/routing results are ignored. */
+  const recipientSelectionEpochRef = useRef(0);
+
+  /** Merge latest contact rows into gender UI (IDs and assignments unchanged). */
+  useEffect(() => {
+    if (!genderDetected || genderSkipped) return;
+    const rows = selectedContactsBatch?.data as any[] | undefined;
+    if (!rows?.length) return;
+    const byId = new Map(rows.map((c) => [c.id, c]));
+    setGenderStates((prev) => {
+      if (!prev.length) return prev;
+      let changed = false;
+      const next = prev.map((s) => {
+        const c = byId.get(s.contactId);
+        if (!c) return s;
+        const email = c.email ?? s.email;
+        const firstName = c.firstName ?? s.firstName;
+        const linkedin = c.linkedin ?? s.linkedin;
+        if (email === s.email && firstName === s.firstName && linkedin === s.linkedin) return s;
+        changed = true;
+        return { ...s, email, firstName, linkedin };
+      });
+      return changed ? next : prev;
+    });
+  }, [selectedContactsBatch?.data, genderDetected, genderSkipped]);
+
+  /** Merge latest contact rows into routing preview rows (template choices unchanged). */
+  useEffect(() => {
+    if (!routingPreviewDone) return;
+    const rows = selectedContactsBatch?.data as any[] | undefined;
+    if (!rows?.length) return;
+    const byId = new Map(rows.map((c) => [c.id, c]));
+    setRoutingAssignments((prev) => {
+      if (!prev.length) return prev;
+      let changed = false;
+      const next = prev.map((a) => {
+        const c = byId.get(a.contactId);
+        if (!c) return a;
+        const email = c.email ?? a.email;
+        const firstName = c.firstName ?? a.firstName;
+        const lastName = c.lastName ?? a.lastName;
+        const jobTitle = c.jobTitle ?? a.jobTitle;
+        if (
+          email === a.email &&
+          firstName === a.firstName &&
+          lastName === a.lastName &&
+          jobTitle === a.jobTitle
+        ) {
+          return a;
+        }
+        changed = true;
+        return { ...a, email, firstName, lastName, jobTitle };
+      });
+      return changed ? next : prev;
+    });
+  }, [selectedContactsBatch?.data, routingPreviewDone]);
+
+  /** Drop campaign-only first name overrides that now match stored contact data. */
+  useEffect(() => {
+    const rows = selectedContactsBatch?.data as any[] | undefined;
+    if (!rows?.length) return;
+    const byId = new Map(rows.map((c) => [c.id, c]));
+    setFirstNameOverrides((prev) => {
+      const keys = Object.keys(prev);
+      if (!keys.length) return prev;
+      let next: Record<string, string> | null = null;
+      for (const id of keys) {
+        const c = byId.get(id);
+        if (!c) continue;
+        const stored = c.firstName ?? '';
+        if (prev[id] === stored) {
+          if (!next) next = { ...prev };
+          delete next[id];
+        }
+      }
+      return next ?? prev;
+    });
+  }, [selectedContactsBatch?.data]);
 
   const { data: templatesRaw } = useQuery({
     queryKey: ['templates-campaign'],
@@ -379,46 +636,87 @@ export default function NewCampaignPage() {
   const contactsTotal = contactsData?.total ?? 0;
   const contactsTotalPages = contactsData?.totalPages ?? 1;
 
+  const selectAllMatchingMutation = useMutation({
+    mutationFn: () => contactsApi.getFilteredIds(recipientFilterParamsBulk),
+    onSuccess: (res) => {
+      setSelectedIds(new Set(res.ids));
+    },
+  });
+
+  const visibleRecipientIds = useMemo(() => contacts.map((c: any) => c.id as string), [contacts]);
+
+  const allRecipientsVisibleSelected =
+    visibleRecipientIds.length > 0 && visibleRecipientIds.every((id: string) => selectedIds.has(id));
+  const someRecipientsVisibleSelected =
+    visibleRecipientIds.some((id: string) => selectedIds.has(id)) && !allRecipientsVisibleSelected;
+
+  const toggleRecipientPageSelection = useCallback(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allRecipientsVisibleSelected) {
+        visibleRecipientIds.forEach((id: string) => next.delete(id));
+      } else {
+        visibleRecipientIds.forEach((id: string) => next.add(id));
+      }
+      return next;
+    });
+  }, [allRecipientsVisibleSelected, visibleRecipientIds]);
+
+  const contactsAllMatchingSelected = contactsTotal > 0 && selectedIds.size === contactsTotal;
+
   const campaignName = useMemo(() => {
-    const selectedContacts = contacts.filter((c: any) => selectedIds.has(c.id));
+    const selectedContacts = [...selectedIds].map((id) => selectedById.get(id)).filter(Boolean);
     const companies = [...new Set(selectedContacts.map((c: any) => c.company).filter(Boolean))] as string[];
     if (companies.length === 1) return companies[0];
     if (companies.length > 1) return companies.slice(0, 2).join(', ') + (companies.length > 2 ? ` +${companies.length - 2}` : '');
     const pad = (n: number) => String(n).padStart(2, '0');
     const d = new Date();
     return `Campaign — ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  }, [contacts, selectedIds]);
+  }, [selectedIds, selectedById]);
 
   const STEPS = campaignMode === 'routing' ? ROUTING_STEPS : SINGLE_STEPS;
 
   // ── Gender detection ────────────────────────────────────────────────────────
   const runGenderDetection = useCallback(async () => {
     if (genderDetected || genderSkipped) return;
+    const epoch = recipientSelectionEpochRef.current;
     setGenderDetecting(true);
     setGenderError(null);
+    setGenderLimitReached(false);
     try {
       const contactIds = [...selectedIds];
-      const results: any[] = await campaignsApi.detectGenders(contactIds);
-      const contactMap = new Map(contacts.map((c: any) => [c.id, c]));
+      const res = await campaignsApi.detectGenders(contactIds);
+      if (recipientSelectionEpochRef.current !== epoch) return;
+      const results = res.results;
       const states: ContactGenderState[] = results.map((r) => {
-        const contact = contactMap.get(r.contactId);
+        const contact = selectedById.get(String(r.contactId ?? '').trim());
+        const g = parseBinaryGender(r.gender);
         return {
           contactId: r.contactId,
           email: (contact as any)?.email ?? '',
           firstName: r.firstName,
           linkedin: (contact as any)?.linkedin ?? null,
-          detectedGender: r.gender,
+          detectedGender: g,
           probability: r.probability,
           autoAssigned: r.autoAssigned,
-          assignedGender: r.autoAssigned ? r.gender : null,
+          assignedGender: r.autoAssigned && g ? g : null,
         };
       });
       setGenderStates(states);
       setGenderDetected(true);
-    } catch {
-      setGenderError('Could not reach the gender detection service. Please assign genders manually or skip.');
+      if (res.externalDetectionBlocked) {
+        setGenderLimitReached(true);
+        setGenderError(
+          res.externalDetectionMessage ??
+            'Gender detection limit reached — manual input is required for contacts not resolved locally.',
+        );
+      }
+    } catch (e) {
+      if (recipientSelectionEpochRef.current !== epoch) return;
+      setGenderLimitReached(false);
+      setGenderError(getDetectGendersErrorMessage(e));
       const states: ContactGenderState[] = [...selectedIds].map((id) => {
-        const contact = contacts.find((c: any) => c.id === id);
+        const contact = selectedById.get(id);
         return {
           contactId: id,
           email: (contact as any)?.email ?? '',
@@ -433,9 +731,11 @@ export default function NewCampaignPage() {
       setGenderStates(states);
       setGenderDetected(true);
     } finally {
-      setGenderDetecting(false);
+      if (recipientSelectionEpochRef.current === epoch) {
+        setGenderDetecting(false);
+      }
     }
-  }, [selectedIds, contacts, genderDetected, genderSkipped]);
+  }, [selectedIds, selectedById, genderDetected, genderSkipped]);
 
   useEffect(() => {
     if (step === 1 && !genderDetected && !genderSkipped && !genderDetecting) {
@@ -445,16 +745,20 @@ export default function NewCampaignPage() {
 
   // ── Routing preview ──────────────────────────────────────────────────────────
   const runRoutingPreview = useCallback(async () => {
+    const epoch = recipientSelectionEpochRef.current;
     setRoutingLoading(true);
     try {
       const assignments: RoutingAssignment[] = await routingRulesApi.previewRouting(
         [...selectedIds],
         fallbackTemplateId || undefined,
       );
+      if (recipientSelectionEpochRef.current !== epoch) return;
       setRoutingAssignments(assignments);
       setRoutingPreviewDone(true);
     } finally {
-      setRoutingLoading(false);
+      if (recipientSelectionEpochRef.current === epoch) {
+        setRoutingLoading(false);
+      }
     }
   }, [selectedIds, fallbackTemplateId]);
 
@@ -473,6 +777,32 @@ export default function NewCampaignPage() {
       return next;
     });
   }, [selectedIds]);
+
+  /**
+   * Recipient set is the source of truth. Changing it after visiting later steps leaves
+   * genderDetected / routingPreviewDone etc. true with stale rows — reset derived state
+   * whenever the selected id set changes (including after Back → edit selection → Next).
+   */
+  const prevRecipientSelectionKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevRecipientSelectionKeyRef.current === null) {
+      prevRecipientSelectionKeyRef.current = selectedIdsKey;
+      return;
+    }
+    if (prevRecipientSelectionKeyRef.current === selectedIdsKey) return;
+    prevRecipientSelectionKeyRef.current = selectedIdsKey;
+    recipientSelectionEpochRef.current += 1;
+
+    setGenderStates([]);
+    setGenderDetected(false);
+    setGenderSkipped(false);
+    setGenderDetecting(false);
+    setGenderError(null);
+    setGenderLimitReached(false);
+    setRoutingAssignments([]);
+    setRoutingPreviewDone(false);
+    setRoutingLoading(false);
+  }, [selectedIdsKey]);
 
   const setContactGender = (contactId: string, gender: 'male' | 'female') => {
     setGenderStates((prev) =>
@@ -507,11 +837,6 @@ export default function NewCampaignPage() {
     });
   }, []);
 
-  const toggleAll = useCallback(() => {
-    if (selectedIds.size === contacts.length) setSelectedIds(new Set());
-    else setSelectedIds(new Set(contacts.map((c: any) => c.id)));
-  }, [contacts, selectedIds.size]);
-
   const handleTemplateSelect = (templateId: string) => {
     setSelectedTemplateId(templateId);
   };
@@ -545,7 +870,7 @@ export default function NewCampaignPage() {
   const buildContactVariableOverrides = (): Record<string, Record<string, string>> => {
     const out: Record<string, Record<string, string>> = {};
     for (const id of selectedIds) {
-      const c = contacts.find((x: any) => x.id === id);
+      const c = selectedById.get(id);
       if (!c) continue;
       const orig = c.firstName ?? '';
       const edited = firstNameOverrides[id];
@@ -621,13 +946,22 @@ export default function NewCampaignPage() {
   const personalizationOverrideCount = useMemo(() => {
     let n = 0;
     for (const id of selectedIds) {
-      const c = contacts.find((x: any) => x.id === id);
+      const c = selectedById.get(id);
       if (!c) continue;
       const o = firstNameOverrides[id];
       if (o !== undefined && o !== (c.firstName ?? '')) n++;
     }
     return n;
-  }, [selectedIds, contacts, firstNameOverrides]);
+  }, [selectedIds, selectedById, firstNameOverrides]);
+
+  const genderStateById = useMemo(() => {
+    const m = new Map<string, ContactGenderState>();
+    for (const s of genderStates) {
+      const k = String(s.contactId ?? '').trim();
+      if (k) m.set(k, s);
+    }
+    return m;
+  }, [genderStates]);
 
   // Routing summary for review
   const routingByTemplate = routingAssignments.reduce<Record<string, { name: string; count: number; category: string | null }>>((acc, a) => {
@@ -778,29 +1112,80 @@ export default function NewCampaignPage() {
                 </span>
               </div>
             )}
+            {priorOutreachSelectedIds.length > 0 && (
+              <div
+                role="status"
+                className="flex flex-col gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm dark:bg-amber-500/15"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <div>
+                    <p className="font-medium text-foreground">
+                      You have already contacted {priorOutreachSelectedIds.length}{' '}
+                      {priorOutreachSelectedIds.length === 1 ? 'person' : 'people'} in your selection (sent, scheduled, or previous
+                      replies).
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      This is only a reminder — you can continue with the campaign or remove them from the recipient list.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 pl-6">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="border-amber-600/45 text-foreground hover:bg-amber-500/15"
+                    onClick={removePriorOutreachFromSelection}
+                  >
+                    Remove {priorOutreachSelectedIds.length} from selection
+                  </Button>
+                </div>
+              </div>
+            )}
             <ContactsFiltersBar variant="plain" value={recipientFilters} onFiltersChange={handleRecipientFiltersChange} />
 
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-sm text-muted-foreground">
-                {contactsLoading
-                  ? 'Loading contacts…'
-                  : `Showing ${contacts.length} of ${contactsTotal.toLocaleString()} contacts${contactsTotal !== contacts.length ? ' (this page)' : ''}`}
-              </p>
-              <Button variant="outline" size="sm" onClick={toggleAll} disabled={contactsLoading || contacts.length === 0}>
-                {selectedIds.size === contacts.length && contacts.length > 0
-                  ? 'Deselect all on page'
-                  : `Select all on page (${contacts.length})`}
-              </Button>
-            </div>
+            {!contactsLoading && (
+              <ContactsTableToolbar
+                className="rounded-lg border border-border/80"
+                total={contactsTotal}
+                page={recipientPage}
+                pageSize={recipientPageSize}
+                totalPages={contactsTotalPages}
+                visibleCount={contacts.length}
+                loading={contactsLoading}
+                selectedCount={selectedIds.size}
+                allMatchingSelected={contactsAllMatchingSelected}
+                entityLabel="recipients"
+                onPageChange={setRecipientPage}
+                onPageSizeChange={(n) => {
+                  setRecipientPageSize(n);
+                  setRecipientPage(1);
+                }}
+                onClearSelection={() => setSelectedIds(new Set())}
+                onSelectAllMatching={() => selectAllMatchingMutation.mutate()}
+                selectAllMatchingLoading={selectAllMatchingMutation.isPending}
+              />
+            )}
+
+            {contactsLoading && (
+              <p className="text-sm text-muted-foreground">Loading contacts…</p>
+            )}
 
             <div className="max-h-[400px] overflow-y-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 border-b bg-muted/80 backdrop-blur-sm">
                   <tr>
-                    <th className="p-3">
+                    <th className="p-3" title="Applies only to rows on this page">
                       <Checkbox
-                        checked={selectedIds.size === contacts.length && contacts.length > 0}
-                        onCheckedChange={toggleAll}
+                        checked={
+                          allRecipientsVisibleSelected
+                            ? true
+                            : someRecipientsVisibleSelected
+                              ? 'indeterminate'
+                              : false
+                        }
+                        onCheckedChange={toggleRecipientPageSelection}
                         disabled={contactsLoading || contacts.length === 0}
                       />
                     </th>
@@ -822,10 +1207,18 @@ export default function NewCampaignPage() {
                       </td>
                     </tr>
                   ) : (
-                    contacts.map((c: any) => (
+                    contacts.map((c: any) => {
+                      const rowPriorOutreach =
+                        selectedIds.has(c.id) && contactHasPriorOutreach(c.emailStatus);
+                      return (
                       <tr
                         key={c.id}
-                        className={cn('cursor-pointer transition-colors hover:bg-muted/30', selectedIds.has(c.id) && 'bg-primary/5')}
+                        className={cn(
+                          'cursor-pointer transition-colors hover:bg-muted/30',
+                          rowPriorOutreach
+                            ? 'border-l-4 border-amber-500 bg-amber-500/[0.07]'
+                            : selectedIds.has(c.id) && 'bg-primary/5',
+                        )}
                         onClick={() => toggleContact(c.id)}
                       >
                         <td className="p-3">
@@ -838,7 +1231,14 @@ export default function NewCampaignPage() {
                         <td className="p-3 text-muted-foreground">{c.company || '—'}</td>
                         <td className="p-3 text-muted-foreground">{c.jobTitle || '—'}</td>
                         <td className="p-3">
-                          <ContactEmailStatusLabel emailStatus={c.emailStatus} />
+                          <div className="flex flex-wrap items-center gap-2">
+                            <ContactEmailStatusLabel emailStatus={c.emailStatus} />
+                            {rowPriorOutreach && (
+                              <span className="rounded-md bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-200">
+                                Prior outreach
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="p-3">
                           {c.verificationStatus ? (
@@ -877,7 +1277,8 @@ export default function NewCampaignPage() {
                           )}
                         </td>
                       </tr>
-                    ))
+                    );
+                    })
                   )}
                   {!contactsLoading && contacts.length === 0 && (
                     <tr>
@@ -890,31 +1291,6 @@ export default function NewCampaignPage() {
               </table>
             </div>
 
-            {contactsTotalPages > 1 && (
-              <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
-                <p className="text-sm text-muted-foreground">
-                  Page {recipientPage} of {contactsTotalPages}
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={recipientPage <= 1 || contactsLoading}
-                    onClick={() => setRecipientPage((p) => Math.max(1, p - 1))}
-                  >
-                    Previous
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={recipientPage >= contactsTotalPages || contactsLoading}
-                    onClick={() => setRecipientPage((p) => p + 1)}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </div>
-            )}
           </CardContent>
         </Card>
       )}
@@ -938,13 +1314,33 @@ export default function NewCampaignPage() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <p className="text-sm font-medium">Detecting genders via genderize.io…</p>
                   <p className="text-xs">Analysing {selectedIds.size} contacts by first name</p>
+                  <p className="text-xs text-center max-w-sm text-muted-foreground/90">
+                    If the provider rate-limits or is unavailable, this step will stop shortly and you can assign genders manually.
+                  </p>
                 </div>
               )}
 
               {genderError && (
-                <div className="flex items-start gap-2 rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+                <div
+                  className={cn(
+                    'flex items-start gap-2 rounded-lg border p-3 text-sm',
+                    genderLimitReached
+                      ? 'border-amber-300 bg-amber-50 text-amber-950'
+                      : 'border-yellow-200 bg-yellow-50 text-yellow-800',
+                  )}
+                >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <p>{genderError}</p>
+                  <div className="space-y-1">
+                    {genderLimitReached && (
+                      <p className="font-semibold text-amber-900">Automatic detection stopped (API limit)</p>
+                    )}
+                    <p>{genderError}</p>
+                    {genderLimitReached && (
+                      <p className="text-xs text-amber-900/80">
+                        Manual gender selection is required below for contacts without a confident auto-assignment. You can continue the campaign once each contact has a gender or you skip this step.
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1007,7 +1403,11 @@ export default function NewCampaignPage() {
                                     </div>
                                   ) : (
                                     <span className="text-xs text-muted-foreground italic">
-                                      {s.firstName ? 'Not found' : 'No first name'}
+                                      {s.firstName
+                                        ? genderLimitReached
+                                          ? 'Not detected (limit) — choose manually'
+                                          : 'Not found'
+                                        : 'No first name'}
                                     </span>
                                   )}
                                 </td>
@@ -1094,7 +1494,13 @@ export default function NewCampaignPage() {
                   <SkipForward className="h-4 w-4" />
                   Gender detection skipped — all contacts will receive the default template version.
                   <button type="button" className="ml-auto text-primary hover:underline"
-                    onClick={() => { setGenderSkipped(false); setGenderDetected(false); setGenderStates([]); }}>
+                    onClick={() => {
+                      setGenderSkipped(false);
+                      setGenderDetected(false);
+                      setGenderStates([]);
+                      setGenderError(null);
+                      setGenderLimitReached(false);
+                    }}>
                     Undo
                   </button>
                 </div>
@@ -1125,37 +1531,82 @@ export default function NewCampaignPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              Adjust first names for this campaign only (e.g. bad CSV data). Contact records in your database are not updated.
-              Open LinkedIn when you need to double-check a contact before sending.
+              Review company, gender (from the previous step), and how each name will appear in the email.
+              You can adjust first names for this campaign only — contact records in your database are not updated.
+              Open LinkedIn when you need to double-check someone before sending.
             </p>
-            <div className="max-h-[min(360px,50vh)] overflow-y-auto rounded-lg border">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 border-b bg-muted/80 backdrop-blur-sm">
+            <div className="max-h-[min(420px,55vh)] overflow-x-auto overflow-y-auto rounded-lg border">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead className="sticky top-0 z-[1] border-b bg-muted/80 backdrop-blur-sm">
                   <tr>
-                    <th className="p-3 text-left font-medium text-muted-foreground">Email</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Contact</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Company</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Job title</th>
+                    <th className="p-3 text-left font-medium text-muted-foreground">Gender</th>
                     <th className="p-3 text-left font-medium text-muted-foreground">LinkedIn</th>
                     <th className="p-3 text-left font-medium text-muted-foreground">First name (in email)</th>
                     <th className="p-3 text-left font-medium text-muted-foreground">Stored value</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {[...selectedIds].map((id) => {
-                    const c = contacts.find((x: any) => x.id === id);
+                  {selectedContactsLoading && (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                        <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-primary" />
+                        Loading selected contacts…
+                      </td>
+                    </tr>
+                  )}
+                  {!selectedContactsLoading &&
+                    [...selectedIds].map((id) => {
+                    const c = selectedById.get(id);
                     if (!c) return null;
                     const linkedinUrl = (c.linkedin as string | null | undefined)?.trim() || null;
                     const orig = c.firstName ?? '';
                     const val = firstNameOverrides[id] !== undefined ? firstNameOverrides[id]! : orig;
                     const changed = firstNameOverrides[id] !== undefined && firstNameOverrides[id] !== orig;
+                    const displayName =
+                      [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || '—';
+                    const company = (c.company as string | null | undefined)?.trim() || null;
+                    const jobTitle = (c.jobTitle as string | null | undefined)?.trim() || null;
                     return (
                       <tr key={id}>
-                        <td className="p-3 text-xs text-muted-foreground max-w-[200px] truncate" title={c.email}>{c.email}</td>
-                        <td className="p-3 align-middle">
+                        <td className="p-3 align-top">
+                          <p className="text-xs font-medium text-foreground">{displayName}</p>
+                          <p className="mt-0.5 max-w-[220px] truncate text-[11px] text-muted-foreground" title={c.email}>
+                            {c.email}
+                          </p>
+                        </td>
+                        <td className="p-3 align-top">
+                          <span
+                            className="line-clamp-2 max-w-[160px] text-xs text-muted-foreground"
+                            title={company ?? undefined}
+                          >
+                            {company ?? '—'}
+                          </span>
+                        </td>
+                        <td className="p-3 align-top">
+                          <span
+                            className="line-clamp-2 max-w-[160px] text-xs text-muted-foreground"
+                            title={jobTitle ?? undefined}
+                          >
+                            {jobTitle ?? '—'}
+                          </span>
+                        </td>
+                        <td className="p-3 align-top w-[120px]">
+                          <PersonalizationGenderSummary
+                            state={genderStateById.get(String(id).trim())}
+                            genderSkipped={genderSkipped}
+                            contactStoredGender={c.gender as string | null | undefined}
+                          />
+                        </td>
+                        <td className="p-3 align-top">
                           {linkedinUrl ? (
                             <a
                               href={linkedinUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex max-w-[min(200px,28vw)] items-center gap-1 truncate text-xs font-medium text-[#0077b5] hover:underline"
+                              className="inline-flex max-w-[min(140px,20vw)] items-center gap-1 truncate text-xs font-medium text-[#0077b5] hover:underline"
                               title={linkedinUrl}
                             >
                               <Linkedin className="h-3.5 w-3.5 shrink-0" />
@@ -1165,7 +1616,7 @@ export default function NewCampaignPage() {
                             <span className="text-xs text-muted-foreground">—</span>
                           )}
                         </td>
-                        <td className="p-3 min-w-[140px]">
+                        <td className="p-3 min-w-[140px] align-top">
                           <Input
                             className="h-8 text-sm"
                             value={val}
@@ -1180,7 +1631,7 @@ export default function NewCampaignPage() {
                             }}
                           />
                         </td>
-                        <td className="p-3 text-xs text-muted-foreground">
+                        <td className="p-3 align-top text-xs text-muted-foreground">
                           {changed ? (
                             <span className="line-through opacity-70">{orig || '—'}</span>
                           ) : (
@@ -1190,6 +1641,13 @@ export default function NewCampaignPage() {
                       </tr>
                     );
                   })}
+                  {!selectedContactsLoading && selectedIds.size > 0 && selectedById.size === 0 && (
+                    <tr>
+                      <td colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                        Could not load contact details. Go back and re-select recipients.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

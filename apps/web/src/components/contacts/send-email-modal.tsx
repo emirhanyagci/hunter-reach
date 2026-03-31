@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Send, Mail, Building, ArrowLeft, Loader2, Paperclip, AlertCircle, CheckCircle2,
 } from 'lucide-react';
-import { templatesApi, campaignsApi } from '@/lib/api';
+import { templatesApi, campaignsApi, getDetectGendersErrorMessage } from '@/lib/api';
 
 interface Contact {
   id: string;
@@ -52,6 +52,7 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
   const [selectedGender, setSelectedGender] = useState<'male' | 'female' | 'default'>('default');
   const [detectedGender, setDetectedGender] = useState<{ gender: 'male' | 'female'; probability: number } | null>(null);
   const [isDetectingGender, setIsDetectingGender] = useState(false);
+  const [genderDetectNotice, setGenderDetectNotice] = useState<string | null>(null);
   const [customSubject, setCustomSubject] = useState('');
   const [customBodyHtml, setCustomBodyHtml] = useState('');
   const [mergeFields, setMergeFields] = useState<Record<(typeof MERGE_KEYS)[number], string>>(() =>
@@ -101,14 +102,23 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
     setMergeFields(buildMergeFieldsFromContact(contact));
     setDetectedGender(null);
     setSelectedGender('default');
+    setGenderDetectNotice(null);
 
     if (!contact.firstName) return;
 
+    let cancelled = false;
     setIsDetectingGender(true);
     campaignsApi
       .detectGenders([contact.id])
-      .then((results: any[]) => {
-        const result = results[0];
+      .then((res) => {
+        if (cancelled) return;
+        const result = res.results[0];
+        if (res.externalDetectionBlocked) {
+          setGenderDetectNotice(
+            res.externalDetectionMessage ??
+              'Gender detection limit reached — choose male, female, or default manually.',
+          );
+        }
         if (result?.autoAssigned && result?.gender) {
           setDetectedGender({ gender: result.gender, probability: result.probability });
           setSelectedGender(result.gender);
@@ -117,10 +127,17 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
           setCustomBodyHtml(content.bodyHtml);
         }
       })
-      .catch(() => {})
-      .finally(() => setIsDetectingGender(false));
+      .catch((e) => {
+        if (!cancelled) setGenderDetectNotice(getDetectGendersErrorMessage(e));
+      })
+      .finally(() => {
+        if (!cancelled) setIsDetectingGender(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTemplateId, step]);
+  }, [selectedTemplateId, step, contact?.id]);
 
   const { data: renderedPreview, isFetching: previewLoading } = useQuery({
     queryKey: [
@@ -171,6 +188,7 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
     setSelectedTemplateId('');
     setSelectedGender('default');
     setDetectedGender(null);
+    setGenderDetectNotice(null);
     setCustomSubject('');
     setCustomBodyHtml('');
     setMergeFields(buildMergeFieldsFromContact(null));
@@ -306,6 +324,12 @@ export function SendEmailModal({ contact, open, onOpenChange }: SendEmailModalPr
                       </span>
                     ) : null}
                   </div>
+                  {genderDetectNotice && (
+                    <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-2 text-xs text-amber-950">
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{genderDetectNotice}</span>
+                    </div>
+                  )}
                   <Select
                     value={selectedGender}
                     onValueChange={(v) => handleGenderChange(v as any)}

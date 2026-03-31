@@ -145,3 +145,35 @@ export function getScheduleReconcileConfig(config: ConfigService): ScheduleRecon
     periodicIntervalMs,
   };
 }
+
+export interface GmailReplySyncConfig {
+  /** 0 = disable background polling only. */
+  periodicIntervalMs: number;
+  /** Only consider SENT jobs newer than this (limits Gmail API volume). */
+  maxJobAgeDays: number;
+  /** Small pause between Gmail thread fetches to reduce burst rate limits (periodic/startup). */
+  interThreadDelayMs: number;
+  /** Parallel thread.get calls when the user triggers manual sync (1 = sequential). */
+  manualThreadConcurrency: number;
+  /** Pause between manual sync batches (after each concurrent batch completes). */
+  manualInterBatchDelayMs: number;
+  /** Parallel messages.get when backfilling thread IDs at sync start. */
+  threadBackfillConcurrency: number;
+}
+
+export function getGmailReplySyncConfig(config: ConfigService): GmailReplySyncConfig {
+  let periodicIntervalMs = 180_000;
+  const intervalRaw = config.get<string>('GMAIL_REPLY_SYNC_INTERVAL_MS');
+  if (intervalRaw !== undefined && intervalRaw !== '') {
+    const n = parseInt(intervalRaw, 10);
+    if (Number.isFinite(n) && n >= 0) periodicIntervalMs = n;
+  }
+  return {
+    periodicIntervalMs,
+    maxJobAgeDays: Math.max(1, envInt(config, 'GMAIL_REPLY_SYNC_MAX_JOB_AGE_DAYS', 365)),
+    interThreadDelayMs: Math.max(0, envInt(config, 'GMAIL_REPLY_SYNC_INTER_THREAD_DELAY_MS', 120)),
+    manualThreadConcurrency: Math.max(1, envInt(config, 'GMAIL_REPLY_SYNC_MANUAL_THREAD_CONCURRENCY', 4)),
+    manualInterBatchDelayMs: Math.max(0, envInt(config, 'GMAIL_REPLY_SYNC_MANUAL_INTER_BATCH_DELAY_MS', 80)),
+    threadBackfillConcurrency: Math.max(1, envInt(config, 'GMAIL_REPLY_SYNC_THREAD_BACKFILL_CONCURRENCY', 5)),
+  };
+}

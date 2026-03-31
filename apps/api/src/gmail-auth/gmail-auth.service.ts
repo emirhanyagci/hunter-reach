@@ -26,6 +26,7 @@ export class GmailAuthService {
       prompt: 'consent',           // forces refresh_token every time
       scope: [
         'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/gmail.readonly',
         'https://www.googleapis.com/auth/userinfo.email',
       ],
       state: userId,               // pass userId through OAuth flow

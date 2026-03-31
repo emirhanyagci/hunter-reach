@@ -3,6 +3,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { GmailAuthService } from './gmail-auth.service';
 import { GmailAuthController } from './gmail-auth.controller';
+import { GmailReplySyncService } from './gmail-reply-sync.service';
+import { GmailThreadViewService } from './gmail-thread-view.service';
 
 @Module({
   imports: [
@@ -14,7 +16,7 @@ import { GmailAuthController } from './gmail-auth.controller';
     }),
   ],
   controllers: [GmailAuthController],
-  providers: [GmailAuthService],
-  exports: [GmailAuthService],
+  providers: [GmailAuthService, GmailReplySyncService, GmailThreadViewService],
+  exports: [GmailAuthService, GmailReplySyncService, GmailThreadViewService],
 })
 export class GmailAuthModule {}

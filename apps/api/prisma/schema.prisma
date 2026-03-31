@@ -33,6 +33,21 @@ model CompanyNote {
   companyName String   @map("company_name")
   content     String   @default("")
   links       Json     @default("[]") @db.JsonB
+  /// Application-tracking status (existing rows default to INTERESTED via migration).
+  status               CompanyTrackerStatus @default(INTERESTED)
+  /// Optional link to a contact row when the company was picked from imported contacts.
+  sourceContactId      String?              @map("source_contact_id")
+  sourceContact        Contact?             @relation(fields: [sourceContactId], references: [id], onDelete: SetNull)
+  appliedAt            DateTime?            @map("applied_at")
+  /// Next time to send a reminder email (UTC).
+  reminderAt           DateTime?            @map("reminder_at")
+  /// IANA timezone for interpreting local reminder picks in the UI (stored dates are UTC).
+  reminderTimezone     String               @default("UTC") @map("reminder_timezone")
+  /// If set, after each reminder email, schedule the next for now + N days (until cleared or stop rule).
+  reminderRecurrenceDays Int?               @map("reminder_recurrence_days")
+  /// When true, recurring reminders stop once status is APPLIED.
+  reminderStopOnApplied  Boolean            @default(true) @map("reminder_stop_on_applied")
+  lastReminderSentAt     DateTime?          @map("last_reminder_sent_at")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -80,6 +95,7 @@ model Contact {
 
   campaignContacts   CampaignContact[]
   emailJobs          EmailJob[]
+  companyNotes       CompanyNote[]
 
   @@unique([userId, email])
   @@map("contacts")
@@ -283,4 +299,12 @@ enum EmailEventType {
   BOUNCED
   COMPLAINED
   REPLIED
+}
+
+enum CompanyTrackerStatus {
+  INTERESTED
+  PLANNED
+  APPLIED
+  REMINDER_SET
+  ARCHIVED
 }

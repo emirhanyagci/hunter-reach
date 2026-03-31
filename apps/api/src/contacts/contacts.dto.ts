@@ -1,4 +1,15 @@
-import { IsOptional, IsString, IsNumber, IsArray, Min, IsEmail, IsIn, IsBoolean } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  IsNumber,
+  IsArray,
+  Min,
+  Max,
+  IsEmail,
+  IsIn,
+  IsBoolean,
+  ArrayMaxSize,
+} from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -30,7 +41,15 @@ export class ContactsFilterDto {
   @IsIn(['never_contacted', 'scheduled', 'sent', 'replied', 'not_replied'])
   emailStatus?: 'never_contacted' | 'scheduled' | 'sent' | 'replied' | 'not_replied';
   @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() @Min(1) page?: number;
-  @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() @Min(1) limit?: number;
+  @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() @Min(1) @Max(250) limit?: number;
+}
+
+export class ContactIdsLookupDto {
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @IsString({ each: true })
+  @ArrayMaxSize(5000)
+  ids: string[];
 }
 
 export class CreateContactDto {

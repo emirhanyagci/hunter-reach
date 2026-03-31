@@ -1,7 +1,8 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ContactsFilterDto, CreateContactDto, UpdateContactDto } from './contacts.dto';
+import { FollowUpRecommendationService } from './follow-up-recommendation.service';
 
 /** Mirrors emailStatus derivation in findAll / findOne (emailJobs ordered by createdAt desc). */
 function emailStatusWhere(
@@ -25,7 +26,11 @@ function emailStatusWhere(
     case 'scheduled':
       return {
         AND: [
-          { emailJobs: { some: { status: 'SCHEDULED' } } },
+          {
+            emailJobs: {
+              some: { OR: [{ status: 'SCHEDULED' }, { status: 'PROCESSING' }] },
+            },
+          },
           {
             NOT: {
               emailJobs: {
@@ -47,6 +52,7 @@ function emailStatusWhere(
                 { status: 'REPLIED' },
                 { status: 'SENT' },
                 { status: 'SCHEDULED' },
+                { status: 'PROCESSING' },
               ],
             },
           },
@@ -57,14 +63,53 @@ function emailStatusWhere(
   }
 }
 
+const contactListJobInclude = {
+  emailJobs: {
+    select: {
+      id: true,
+      status: true,
+      replyCount: true,
+      sentAt: true,
+      scheduledAt: true,
+      isReminder: true,
+      createdAt: true,
+      threadId: true,
+    },
+    orderBy: { createdAt: 'desc' as const },
+  },
+} satisfies Prisma.ContactInclude;
+
+function mapContactToListRow(c: any) {
+  const jobs = c.emailJobs ?? [];
+  const hasReplied = jobs.some((j: any) => j.replyCount > 0 || j.status === 'REPLIED');
+  const hasSent = jobs.some((j: any) => j.status === 'SENT' || j.status === 'REPLIED');
+  const hasScheduled = jobs.some(
+    (j: any) => j.status === 'SCHEDULED' || j.status === 'PROCESSING',
+  );
+
+  let derivedEmailStatus: 'never_contacted' | 'scheduled' | 'sent' | 'replied' = 'never_contacted';
+  if (hasReplied) derivedEmailStatus = 'replied';
+  else if (hasSent) derivedEmailStatus = 'sent';
+  else if (hasScheduled) derivedEmailStatus = 'scheduled';
+
+  const lastJob = jobs[0];
+  return {
+    ...c,
+    emailStatus: derivedEmailStatus,
+    lastEmailSentAt: lastJob?.sentAt ?? null,
+    emailJobCount: jobs.length,
+  };
+}
+
 @Injectable()
 export class ContactsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private followUpRecommendation: FollowUpRecommendationService,
+  ) {}
 
-  async findAll(userId: string, filter: ContactsFilterDto) {
+  private buildContactWhere(userId: string, filter: ContactsFilterDto): Prisma.ContactWhereInput {
     const {
-      page = 1,
-      limit = 50,
       importId,
       search,
       jobTitle,
@@ -78,7 +123,6 @@ export class ContactsService {
       hasLinkedin,
       emailStatus,
     } = filter;
-    const skip = (page - 1) * limit;
 
     const where: Prisma.ContactWhereInput = { userId };
     if (importId) where.importId = importId;
@@ -125,43 +169,61 @@ export class ContactsService {
       where.AND = [...existingAnd, ...andParts];
     }
 
+    return where;
+  }
+
+  async findAll(userId: string, filter: ContactsFilterDto) {
+    const page = filter.page ?? 1;
+    const limit = filter.limit ?? 50;
+    const skip = (page - 1) * limit;
+    const where = this.buildContactWhere(userId, filter);
+
     const [contacts, total] = await Promise.all([
       this.prisma.contact.findMany({
         where,
         skip,
         take: limit,
         orderBy: { createdAt: 'desc' },
-        include: {
-          emailJobs: {
-            select: { status: true, replyCount: true, sentAt: true, scheduledAt: true },
-            orderBy: { createdAt: 'desc' },
-          },
-        },
+        include: contactListJobInclude,
       }),
       this.prisma.contact.count({ where }),
     ]);
 
-    const data = contacts.map((c) => {
-      const jobs = c.emailJobs ?? [];
-      const hasReplied = jobs.some((j) => j.replyCount > 0 || j.status === 'REPLIED');
-      const hasSent = jobs.some((j) => j.status === 'SENT' || j.status === 'REPLIED');
-      const hasScheduled = jobs.some((j) => j.status === 'SCHEDULED');
-
-      let emailStatus: 'never_contacted' | 'scheduled' | 'sent' | 'replied' = 'never_contacted';
-      if (hasReplied) emailStatus = 'replied';
-      else if (hasSent) emailStatus = 'sent';
-      else if (hasScheduled) emailStatus = 'scheduled';
-
-      const lastJob = jobs[0];
-      return {
-        ...c,
-        emailStatus,
-        lastEmailSentAt: lastJob?.sentAt ?? null,
-        emailJobCount: jobs.length,
-      };
-    });
+    const data = contacts.map((c) => mapContactToListRow(c));
+    await this.followUpRecommendation.attachHints(userId, data);
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async findFilteredIds(userId: string, filter: ContactsFilterDto) {
+    const where = this.buildContactWhere(userId, filter);
+    const [total, rows] = await Promise.all([
+      this.prisma.contact.count({ where }),
+      this.prisma.contact.findMany({
+        where,
+        select: { id: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    return { ids: rows.map((r) => r.id), total };
+  }
+
+  async lookupByIds(userId: string, ids: string[]) {
+    if (!ids?.length) {
+      return { data: [] };
+    }
+    const unique = [...new Set(ids)];
+    if (unique.length > 5000) {
+      throw new BadRequestException('Too many contact IDs (max 5000)');
+    }
+    const contacts = await this.prisma.contact.findMany({
+      where: { userId, id: { in: unique } },
+      include: contactListJobInclude,
+      orderBy: { createdAt: 'desc' },
+    });
+    const data = contacts.map((c) => mapContactToListRow(c));
+    await this.followUpRecommendation.attachHints(userId, data);
+    return { data };
   }
 
   async findOne(id: string, userId: string) {
@@ -183,14 +245,18 @@ export class ContactsService {
     const jobs = contact.emailJobs ?? [];
     const hasReplied = jobs.some((j) => j.replyCount > 0 || j.status === 'REPLIED');
     const hasSent = jobs.some((j) => j.status === 'SENT' || j.status === 'REPLIED');
-    const hasScheduled = jobs.some((j) => j.status === 'SCHEDULED');
+    const hasScheduled = jobs.some(
+      (j) => j.status === 'SCHEDULED' || j.status === 'PROCESSING',
+    );
 
     let emailStatus: 'never_contacted' | 'scheduled' | 'sent' | 'replied' = 'never_contacted';
     if (hasReplied) emailStatus = 'replied';
     else if (hasSent) emailStatus = 'sent';
     else if (hasScheduled) emailStatus = 'scheduled';
 
-    return { ...contact, emailStatus };
+    const row = { ...contact, emailStatus };
+    await this.followUpRecommendation.attachHints(userId, [row]);
+    return row;
   }
 
   async create(userId: string, dto: CreateContactDto) {

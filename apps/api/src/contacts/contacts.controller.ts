@@ -2,7 +2,7 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Re
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ContactsService } from './contacts.service';
-import { ContactsFilterDto, CreateContactDto, UpdateContactDto } from './contacts.dto';
+import { ContactsFilterDto, ContactIdsLookupDto, CreateContactDto, UpdateContactDto } from './contacts.dto';
 
 @ApiTags('contacts')
 @ApiBearerAuth()
@@ -21,9 +21,21 @@ export class ContactsController {
     return this.contactsService.getStats(req.user.sub);
   }
 
+  /** All contact IDs matching the same filters as GET /contacts (ignores pagination). */
+  @Get('filtered-ids')
+  findFilteredIds(@Query() filter: ContactsFilterDto, @Request() req) {
+    return this.contactsService.findFilteredIds(req.user.sub, filter);
+  }
+
   @Post()
   create(@Body() dto: CreateContactDto, @Request() req) {
     return this.contactsService.create(req.user.sub, dto);
+  }
+
+  /** Full list rows for many IDs (same shape as GET /contacts items). */
+  @Post('lookup')
+  lookupByIds(@Body() dto: ContactIdsLookupDto, @Request() req) {
+    return this.contactsService.lookupByIds(req.user.sub, dto.ids);
   }
 
   @Get(':id')

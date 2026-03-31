@@ -127,7 +127,14 @@ export interface EmailJob {
   updatedAt: string;
 }
 
-// ── Company Notes ─────────────────────────────────────────────────────────────
+// ── Company Notes / application tracker ───────────────────────────────────────
+export type CompanyTrackerStatus =
+  | 'INTERESTED'
+  | 'PLANNED'
+  | 'APPLIED'
+  | 'REMINDER_SET'
+  | 'ARCHIVED';
+
 export interface CompanyNoteLink {
   label: string;
   url: string;
@@ -139,8 +146,40 @@ export interface CompanyNote {
   companyName: string;
   content: string;
   links: CompanyNoteLink[];
+  status: CompanyTrackerStatus;
+  sourceContactId?: string | null;
+  appliedAt?: string | null;
+  reminderAt?: string | null;
+  reminderTimezone: string;
+  reminderRecurrenceDays?: number | null;
+  reminderStopOnApplied: boolean;
+  lastReminderSentAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── Follow-up hints (contacts API) ────────────────────────────────────────────
+export type ContactFollowUpUiStatus = 'none' | 'suggested' | 'suppressed';
+
+export interface ContactFollowUpHint {
+  status: ContactFollowUpUiStatus;
+  tier?: 1 | 2 | 3;
+  badgeLabel?: string;
+  reason:
+    | 'eligible'
+    | 'replied'
+    | 'never_sent'
+    | 'scheduled_only'
+    | 'too_soon'
+    | 'max_followups_sent'
+    | 'company_replies';
+  detailMessage?: string;
+  daysSinceFirstSent?: number;
+  reminderCount?: number;
+  companyMessagedContacts?: number;
+  companyRepliedContacts?: number;
+  companyReplyRatio?: number;
+  eligibleEmailJobId?: string | null;
 }
 
 // ── Pagination ────────────────────────────────────────────────────────────────

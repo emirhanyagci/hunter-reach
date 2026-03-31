@@ -19,6 +19,8 @@ export interface SendEmailOptions {
   userId: string;
   attachments?: EmailAttachment[];
   threadId?: string;
+  /** Gmail API: set From in the raw MIME (must match the connected account or a Send-as alias). */
+  fromAddress?: string;
 }
 
 // Encode non-ASCII header values using RFC 2047 Base64 encoding.
@@ -87,7 +89,9 @@ export class EmailService {
   /** Simple HTML message — no attachments */
   private buildSimpleMessage(options: SendEmailOptions): string {
     const bodyB64 = Buffer.from(options.html, 'utf-8').toString('base64');
-    return [
+    const head: string[] = [];
+    if (options.fromAddress?.trim()) head.push(`From: ${options.fromAddress.trim()}`);
+    head.push(
       `To: ${options.to}`,
       `Subject: ${rfc2047(options.subject)}`,
       'MIME-Version: 1.0',
@@ -95,19 +99,22 @@ export class EmailService {
       'Content-Transfer-Encoding: base64',
       '',
       bodyB64,
-    ].join('\r\n');
+    );
+    return head.join('\r\n');
   }
 
   /** Multipart/mixed message — HTML body + file attachments */
   private buildMultipartMessage(options: SendEmailOptions): string {
     const boundary = `----=_Part_${Date.now()}`;
-    const lines: string[] = [
+    const lines: string[] = [];
+    if (options.fromAddress?.trim()) lines.push(`From: ${options.fromAddress.trim()}`);
+    lines.push(
       `To: ${options.to}`,
       `Subject: ${rfc2047(options.subject)}`,
       'MIME-Version: 1.0',
       `Content-Type: multipart/mixed; boundary="${boundary}"`,
       '',
-    ];
+    );
 
     // HTML part
     lines.push(
@@ -146,7 +153,7 @@ export class EmailService {
     });
 
     const info = await transporter.sendMail({
-      from: user,
+      from: options.fromAddress?.trim() || user,
       to: options.to,
       subject: options.subject,
       html: options.html,

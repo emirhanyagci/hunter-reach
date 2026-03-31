@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { emailJobsApi, templatesApi } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
@@ -12,9 +12,19 @@ interface SendReminderModalProps {
   onOpenChange: (open: boolean) => void;
   selectedJobIds: string[];
   onSuccess: () => void;
+  /** Defaults to reminder copy; use for contact follow-up flow */
+  title?: string;
+  intro?: ReactNode;
 }
 
-export function SendReminderModal({ open, onOpenChange, selectedJobIds, onSuccess }: SendReminderModalProps) {
+export function SendReminderModal({
+  open,
+  onOpenChange,
+  selectedJobIds,
+  onSuccess,
+  title = 'Send Reminder Emails',
+  intro,
+}: SendReminderModalProps) {
   const [templateId, setTemplateId] = useState('');
   const [result, setResult] = useState<{ sent: number; failed: number; results: any[] } | null>(null);
 
@@ -46,7 +56,7 @@ export function SendReminderModal({ open, onOpenChange, selectedJobIds, onSucces
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Bell className="h-5 w-5" />
-            Send Reminder Emails
+            {title}
           </DialogTitle>
         </DialogHeader>
 
@@ -82,8 +92,13 @@ export function SendReminderModal({ open, onOpenChange, selectedJobIds, onSucces
           <>
             <div className="space-y-4 py-2">
               <p className="text-sm text-muted-foreground">
-                You are about to send reminder emails to <strong>{selectedJobIds.length}</strong> contact{selectedJobIds.length !== 1 ? 's' : ''} who have not replied.
-                The reminder will be sent in the same email thread if possible.
+                {intro ?? (
+                  <>
+                    You are about to send reminder emails to <strong>{selectedJobIds.length}</strong> contact
+                    {selectedJobIds.length !== 1 ? 's' : ''} who have not replied. The reminder will be sent in the
+                    same email thread if possible.
+                  </>
+                )}
               </p>
 
               <div className="space-y-2">

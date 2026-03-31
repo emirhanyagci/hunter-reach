@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback, Suspense } from 'react';
+import { useState, useCallback, Suspense, useMemo, useEffect } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { contactsApi } from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
@@ -8,6 +8,12 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { StatusBadge } from '@/components/email-jobs/status-badge';
 import { Trash2, Users, AlertCircle, Linkedin, Mail, UserPlus, Pencil, History } from 'lucide-react';
+import { SendReminderModal } from '@/components/email-jobs/send-reminder-modal';
+import {
+  ContactFollowUpActionButton,
+  ContactFollowUpCompanyNote,
+  ContactFollowUpEmailStatusExtras,
+} from '@/components/contacts/contact-follow-up-indicator';
 import { useSearchParams } from 'next/navigation';
 import { formatDate } from '@/lib/utils';
 import Link from 'next/link';
@@ -21,6 +27,10 @@ import {
   type ContactsFilterFields,
 } from '@/components/contacts/contacts-filters-bar';
 import { ContactEmailStatusLabel } from '@/lib/contact-email-status';
+import {
+  ContactsTableToolbar,
+  type ContactPageSize,
+} from '@/components/contacts/contacts-table-toolbar';
 
 function ContactsContent() {
   const searchParams = useSearchParams();
@@ -28,28 +38,48 @@ function ContactsContent() {
 
   const [filters, setFilters] = useState<ContactsFilterFields>(() => clearContactsFilters());
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<ContactPageSize>(50);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [sendEmailContact, setSendEmailContact] = useState<any>(null);
   const [contactFormOpen, setContactFormOpen] = useState(false);
   const [editContact, setEditContact] = useState<any>(null);
   const [activityContactId, setActivityContactId] = useState<string | null>(null);
+  const [followUpReminderJobIds, setFollowUpReminderJobIds] = useState<string[] | null>(null);
 
   const importId = searchParams.get('importId');
 
+  useEffect(() => {
+    setPage(1);
+    setSelectedIds(new Set());
+  }, [importId]);
+
+  const listParams = useMemo(
+    () => contactsFiltersToQueryParams(filters, { page, limit: pageSize, importId }),
+    [filters, page, pageSize, importId],
+  );
+
   const { data, isLoading } = useQuery({
-    queryKey: ['contacts', contactsFiltersToQueryParams(filters, { page, limit: 50, importId })],
-    queryFn: () => contactsApi.getAll(contactsFiltersToQueryParams(filters, { page, limit: 50, importId })),
+    queryKey: ['contacts', listParams],
+    queryFn: () => contactsApi.getAll(listParams),
   });
+
+  const filterParamsForBulk = useMemo(
+    () => contactsFiltersToQueryParams(filters, { importId }),
+    [filters, importId],
+  );
 
   const handleFiltersChange = useCallback((next: ContactsFilterFields) => {
     setFilters(next);
     setPage(1);
+    setSelectedIds(new Set());
   }, []);
 
   const deleteMutation = useMutation({
     mutationFn: (ids: string[]) => contactsApi.bulkDelete(ids),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['contacts'] });
+      queryClient.invalidateQueries({ queryKey: ['contacts-campaign'] });
+      queryClient.invalidateQueries({ queryKey: ['contacts-lookup'] });
       setSelectedIds(new Set());
     },
   });
@@ -62,17 +92,36 @@ function ContactsContent() {
     });
   }, []);
 
-  const toggleAll = useCallback(() => {
-    if (selectedIds.size === data?.data?.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(data?.data?.map((c: any) => c.id) || []));
-    }
-  }, [selectedIds.size, data?.data]);
+  const visibleIds = useMemo(() => (data?.data ?? []).map((c: any) => c.id as string), [data?.data]);
+
+  const allVisibleSelected =
+    visibleIds.length > 0 && visibleIds.every((id: string) => selectedIds.has(id));
+  const someVisibleSelected =
+    visibleIds.some((id: string) => selectedIds.has(id)) && !allVisibleSelected;
+
+  const toggleVisiblePageSelection = useCallback(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        visibleIds.forEach((id: string) => next.delete(id));
+      } else {
+        visibleIds.forEach((id: string) => next.add(id));
+      }
+      return next;
+    });
+  }, [allVisibleSelected, visibleIds]);
+
+  const selectAllMatchingMutation = useMutation({
+    mutationFn: () => contactsApi.getFilteredIds(filterParamsForBulk),
+    onSuccess: (res) => {
+      setSelectedIds(new Set(res.ids));
+    },
+  });
 
   const contacts = data?.data || [];
   const total = data?.total || 0;
   const totalPages = data?.totalPages || 1;
+  const allMatchingSelected = total > 0 && selectedIds.size === total;
 
   return (
     <div className="space-y-6">
@@ -126,10 +175,10 @@ function ContactsContent() {
               <table className="w-full text-sm">
                 <thead className="border-b bg-muted/40">
                   <tr>
-                    <th className="p-4">
+                    <th className="p-4" title="Applies only to rows on this page (not all pages)">
                       <Checkbox
-                        checked={selectedIds.size === contacts.length && contacts.length > 0}
-                        onCheckedChange={toggleAll}
+                        checked={allVisibleSelected ? true : someVisibleSelected ? 'indeterminate' : false}
+                        onCheckedChange={toggleVisiblePageSelection}
                       />
                     </th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Contact</th>
@@ -171,13 +220,21 @@ function ContactsContent() {
                           )}
                         </div>
                       </td>
-                      <td className="p-4 text-muted-foreground">{contact.company || '—'}</td>
+                      <td className="p-4 text-muted-foreground">
+                        <div>
+                          {contact.company || '—'}
+                          <ContactFollowUpCompanyNote followUp={contact.followUp} />
+                        </div>
+                      </td>
                       <td className="p-4 text-muted-foreground">{contact.jobTitle || '—'}</td>
                       <td className="p-4">
-                        <ContactEmailStatusLabel
-                          emailStatus={contact.emailStatus}
-                          onClick={(e) => { e.stopPropagation(); setActivityContactId(contact.id); }}
-                        />
+                        <div>
+                          <ContactEmailStatusLabel
+                            emailStatus={contact.emailStatus}
+                            onClick={(e) => { e.stopPropagation(); setActivityContactId(contact.id); }}
+                          />
+                          <ContactFollowUpEmailStatusExtras followUp={contact.followUp} />
+                        </div>
                       </td>
                       <td className="p-4">
                         {contact.verificationStatus ? (
@@ -233,6 +290,13 @@ function ContactsContent() {
                           >
                             <Mail className="h-4 w-4" />
                           </Button>
+                          <ContactFollowUpActionButton
+                            followUp={contact.followUp}
+                            onActionClick={(e) => e.stopPropagation()}
+                            onSendFollowUp={(jobId) => {
+                              setFollowUpReminderJobIds([jobId]);
+                            }}
+                          />
                         </div>
                       </td>
                     </tr>
@@ -242,21 +306,25 @@ function ContactsContent() {
             </div>
           )}
 
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between border-t p-4">
-              <p className="text-sm text-muted-foreground">
-                Page {page} of {totalPages} · {total.toLocaleString()} total
-              </p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>
-                  Previous
-                </Button>
-                <Button variant="outline" size="sm" disabled={page === totalPages} onClick={() => setPage(p => p + 1)}>
-                  Next
-                </Button>
-              </div>
-            </div>
+          {!isLoading && (
+            <ContactsTableToolbar
+              total={total}
+              page={page}
+              pageSize={pageSize}
+              totalPages={totalPages}
+              visibleCount={contacts.length}
+              loading={isLoading}
+              selectedCount={selectedIds.size}
+              allMatchingSelected={allMatchingSelected}
+              onPageChange={setPage}
+              onPageSizeChange={(n) => {
+                setPageSize(n);
+                setPage(1);
+              }}
+              onClearSelection={() => setSelectedIds(new Set())}
+              onSelectAllMatching={() => selectAllMatchingMutation.mutate()}
+              selectAllMatchingLoading={selectAllMatchingMutation.isPending}
+            />
           )}
         </CardContent>
       </Card>
@@ -277,6 +345,26 @@ function ContactsContent() {
         contactId={activityContactId}
         open={!!activityContactId}
         onOpenChange={(open) => { if (!open) setActivityContactId(null); }}
+      />
+
+      <SendReminderModal
+        open={followUpReminderJobIds !== null}
+        onOpenChange={(open) => {
+          if (!open) setFollowUpReminderJobIds(null);
+        }}
+        selectedJobIds={followUpReminderJobIds ?? []}
+        title="Send follow-up"
+        intro={
+          <>
+            Send a follow-up for <strong>{followUpReminderJobIds?.length === 1 ? 'this contact' : 'these contacts'}</strong>
+            . The message uses your template with contact merge fields and gender-specific variants when available. It
+            will be sent in the original Gmail thread when a thread id is stored on the outbound job.
+          </>
+        }
+        onSuccess={() => {
+          queryClient.invalidateQueries({ queryKey: ['contacts'] });
+          queryClient.invalidateQueries({ queryKey: ['email-jobs'] });
+        }}
       />
     </div>
   );

@@ -98,6 +98,8 @@ export function ContactFormModal({ open, onOpenChange, contact }: ContactFormMod
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['contacts'] });
+      queryClient.invalidateQueries({ queryKey: ['contacts-campaign'] });
+      queryClient.invalidateQueries({ queryKey: ['contacts-lookup'] });
       onOpenChange(false);
     },
   });

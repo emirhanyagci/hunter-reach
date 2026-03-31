@@ -10,6 +10,7 @@ import {
   TrendingUp, Mail, AlertTriangle,
 } from 'lucide-react';
 import { SendingLimitUsage } from '@/components/dashboard/sending-limit-usage';
+import { OutreachAnalyticsSection } from '@/components/dashboard/outreach-analytics-section';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -200,6 +201,8 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <OutreachAnalyticsSection />
 
       {/* Recent email jobs */}
       <Card>

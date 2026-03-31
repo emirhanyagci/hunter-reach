@@ -3,11 +3,12 @@ import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'next/navigation';
 import { Suspense } from 'react';
-import { api } from '@/lib/api';
+import { api, authApi } from '@/lib/api';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Mail, CheckCircle2, XCircle, Loader2, AlertCircle, ExternalLink, Unlink } from 'lucide-react';
+import { Mail, CheckCircle2, XCircle, Loader2, AlertCircle, ExternalLink, Unlink, RefreshCw } from 'lucide-react';
+import { formatGmailReplySyncSuccess, useGmailReplySync } from '@/hooks/use-gmail-reply-sync';
 import Cookies from 'js-cookie';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
@@ -20,9 +21,17 @@ function SettingsContent() {
   // Show result from OAuth redirect
   useEffect(() => {
     const gmail = searchParams.get('gmail');
-    if (gmail === 'connected') setNotice({ type: 'success', msg: 'Gmail successfully connected!' });
+    if (gmail === 'connected') {
+      setNotice({ type: 'success', msg: 'Gmail successfully connected!' });
+      queryClient.invalidateQueries({ queryKey: ['auth-me'] });
+    }
     if (gmail === 'error') setNotice({ type: 'error', msg: 'Gmail connection failed. Please try again.' });
-  }, [searchParams]);
+  }, [searchParams, queryClient]);
+
+  const { data: me } = useQuery({
+    queryKey: ['auth-me'],
+    queryFn: () => authApi.me(),
+  });
 
   const { data: status, isLoading } = useQuery({
     queryKey: ['gmail-status'],
@@ -33,7 +42,23 @@ function SettingsContent() {
     mutationFn: () => api.delete('/auth/gmail/disconnect').then(r => r.data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['gmail-status'] });
+      queryClient.invalidateQueries({ queryKey: ['auth-me'] });
       setNotice({ type: 'success', msg: 'Gmail disconnected.' });
+    },
+  });
+
+  const {
+    syncReplies,
+    isSyncPending,
+    progressLabel,
+  } = useGmailReplySync({
+    onAfterSuccess: (data) => {
+      setNotice({ type: 'success', msg: formatGmailReplySyncSuccess(data) });
+    },
+    onAfterError: (err: unknown) => {
+      const msg =
+        (err as any)?.response?.data?.message || (err as Error)?.message || 'Reply sync failed.';
+      setNotice({ type: 'error', msg: String(msg) });
     },
   });
 
@@ -49,6 +74,27 @@ function SettingsContent() {
         title="Settings"
         description="Manage your account and email provider"
       />
+
+      {me && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Account email</CardTitle>
+            <CardDescription>
+              With Gmail connected, this is your linked Gmail address (used for sending and in-app identity).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="text-sm space-y-2">
+            <p className="font-medium break-all">{me.email}</p>
+            {me.loginEmail &&
+              me.email &&
+              String(me.loginEmail).toLowerCase() !== String(me.email).toLowerCase() && (
+                <p className="text-xs text-muted-foreground">
+                  You still sign in with <span className="font-mono">{me.loginEmail}</span> and your password.
+                </p>
+              )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Notice banner */}
       {notice && (
@@ -113,9 +159,37 @@ function SettingsContent() {
                 </p>
                 <p className="flex items-center gap-2">
                   <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                  Read-only Gmail access detects replies on sent threads
+                </p>
+                <p className="flex items-center gap-2">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
                   Lowest spam risk
                 </p>
               </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => syncReplies()}
+                    disabled={isSyncPending}
+                    className="min-w-[12rem]"
+                  >
+                    {isSyncPending ? (
+                      <Loader2 className="mr-2 h-4 w-4 shrink-0 animate-spin" />
+                    ) : (
+                      <RefreshCw className="mr-2 h-4 w-4 shrink-0" />
+                    )}
+                    <span className="text-left">
+                      {isSyncPending ? progressLabel : 'Sync replies from Gmail'}
+                    </span>
+                  </Button>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                If you connected Gmail before reply detection was added, reconnect once so Google can grant read-only
+                access. The app polls Gmail periodically; use this button for an immediate refresh.
+              </p>
 
               <Button
                 variant="outline"
@@ -168,8 +242,10 @@ function SettingsContent() {
               </Button>
 
               <p className="text-xs text-muted-foreground">
-                You'll be redirected to Google to authorize HunterReach to send emails on your behalf.
-                We only request the <code className="bg-muted px-1 rounded">gmail.send</code> permission.
+                You'll be redirected to Google to authorize HunterReach to send mail and read thread metadata (read-only)
+                so replies can be matched to your outreach. Scopes:{' '}
+                <code className="bg-muted px-1 rounded">gmail.send</code>,{' '}
+                <code className="bg-muted px-1 rounded">gmail.readonly</code>.
               </p>
             </div>
           )}

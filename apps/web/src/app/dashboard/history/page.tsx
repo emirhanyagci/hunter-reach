@@ -12,7 +12,24 @@ import { SendReminderModal } from '@/components/email-jobs/send-reminder-modal';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { formatDate } from '@/lib/utils';
-import { History, Eye, Mail, Search, Bell, Filter, X, MessageSquare, Calendar, Zap, Loader2 } from 'lucide-react';
+import {
+  History,
+  Eye,
+  Mail,
+  Search,
+  Bell,
+  Filter,
+  X,
+  MessageSquare,
+  Calendar,
+  Zap,
+  Loader2,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+} from 'lucide-react';
+import { useGmailReplySync } from '@/hooks/use-gmail-reply-sync';
+import { GmailThreadDialog } from '@/components/email-jobs/gmail-thread-dialog';
 
 const STATUS_OPTIONS = [
   { value: 'all', label: 'All statuses' },
@@ -32,6 +49,8 @@ export default function HistoryPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [reminderOpen, setReminderOpen] = useState(false);
   const [sendNowConfirm, setSendNowConfirm] = useState<any>(null);
+  const [gmailThreadOpen, setGmailThreadOpen] = useState(false);
+  const [gmailThreadJobId, setGmailThreadJobId] = useState<string | null>(null);
 
   // Filters
   const [status, setStatus] = useState('all');
@@ -77,7 +96,7 @@ export default function HistoryPage() {
   const campaignList: any[] = campaigns ?? [];
   const templateList: any[] = templates ?? [];
 
-  // Only sent+unreplied jobs can be selected for reminders
+  // Only sent + unreplied jobs can be selected for reminders
   const eligibleForReminder = (job: any) =>
     job.status === 'SENT' && (job.replyCount ?? 0) === 0;
 
@@ -119,7 +138,29 @@ export default function HistoryPage() {
     },
   });
 
+  const {
+    syncReplies,
+    isSyncPending,
+    progressLabel,
+    banner: syncBanner,
+    dismissBanner: dismissSyncBanner,
+    backgroundState,
+  } = useGmailReplySync({
+    successBanner: true,
+    backgroundOnMount: true,
+  });
+
   const canSendNow = (job: any) => job?.status === 'SCHEDULED';
+
+  const hasReplied = (job: any) => (job?.replyCount ?? 0) > 0 || job?.status === 'REPLIED';
+
+  const canOpenGmailThread = (job: any) =>
+    hasReplied(job) && !!job?.threadId && (job.status === 'SENT' || job.status === 'REPLIED');
+
+  const openGmailThread = (jobId: string) => {
+    setGmailThreadJobId(jobId);
+    setGmailThreadOpen(true);
+  };
 
   const clearFilters = () => {
     setStatus('all');
@@ -134,6 +175,35 @@ export default function HistoryPage() {
 
   return (
     <div className="space-y-6">
+      {syncBanner && (
+        <div
+          className={`flex items-center gap-3 rounded-lg border p-3 text-sm ${
+            syncBanner.type === 'success'
+              ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-200'
+              : 'border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200'
+          }`}
+        >
+          {syncBanner.type === 'success' ? (
+            <CheckCircle2 className="h-5 w-5 text-green-500 shrink-0" />
+          ) : (
+            <AlertCircle className="h-5 w-5 text-red-500 shrink-0" />
+          )}
+          <p className="flex-1">{syncBanner.msg}</p>
+          <button
+            type="button"
+            className="text-xs underline opacity-70 hover:opacity-100 shrink-0"
+            onClick={() => dismissSyncBanner()}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {isSyncPending && (
+        <p className="text-sm text-muted-foreground flex items-center gap-2 sm:hidden" aria-live="polite">
+          <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+          {progressLabel}
+        </p>
+      )}
       <PageHeader
         title="Email History"
         description={`${total.toLocaleString()} emails`}
@@ -162,6 +232,35 @@ export default function HistoryPage() {
                   {[status !== 'all', email, company, campaignId, templateId, dateFrom, dateTo].filter(Boolean).length}
                 </span>
               )}
+            </Button>
+            {backgroundState === 'syncing' && !isSyncPending && (
+              <span
+                className="hidden sm:inline-flex items-center gap-1.5 text-xs text-muted-foreground max-w-[11rem]"
+                aria-live="polite"
+              >
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                Checking Gmail…
+              </span>
+            )}
+            {backgroundState === 'done' && !isSyncPending && (
+              <span className="hidden sm:inline text-xs text-muted-foreground" aria-live="polite">
+                Replies checked
+              </span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2 max-sm:max-w-[10rem]"
+              title="Fetch reply state from Gmail threads"
+              disabled={isSyncPending}
+              onClick={() => syncReplies()}
+            >
+              {isSyncPending ? (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4 shrink-0" />
+              )}
+              <span className="truncate">{isSyncPending ? progressLabel : 'Sync replies'}</span>
             </Button>
           </div>
         }
@@ -316,6 +415,7 @@ export default function HistoryPage() {
                     <th className="p-4 text-left font-medium text-muted-foreground">Status</th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Reply</th>
                     <th className="p-4 text-left font-medium text-muted-foreground">Sent at</th>
+                    <th className="p-4 text-left font-medium text-muted-foreground w-24">Thread</th>
                     <th className="p-4" />
                   </tr>
                 </thead>
@@ -323,7 +423,7 @@ export default function HistoryPage() {
                   {jobs.map((job: any) => {
                     const canSelect = eligibleForReminder(job);
                     const isSelected = selectedIds.has(job.id);
-                    const hasReplied = (job.replyCount ?? 0) > 0;
+                    const rowHasReplied = hasReplied(job);
 
                     return (
                       <tr
@@ -364,7 +464,7 @@ export default function HistoryPage() {
                           </div>
                         </td>
                         <td className="p-4">
-                          {hasReplied ? (
+                          {rowHasReplied ? (
                             <span className="inline-flex items-center gap-1 text-xs text-green-600 font-medium">
                               <MessageSquare className="h-3 w-3" />
                               {job.replyCount} repl{job.replyCount !== 1 ? 'ies' : 'y'}
@@ -392,6 +492,26 @@ export default function HistoryPage() {
                             </span>
                           ) : (
                             '—'
+                          )}
+                        </td>
+                        <td className="p-4">
+                          {canOpenGmailThread(job) ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 gap-1 text-xs"
+                              onClick={() => openGmailThread(job.id)}
+                              title="View full Gmail conversation"
+                            >
+                              <MessageSquare className="h-3.5 w-3.5" />
+                              View
+                            </Button>
+                          ) : rowHasReplied && !job.threadId ? (
+                            <span className="text-[10px] text-muted-foreground leading-tight block max-w-[5rem]">
+                              Sync to link thread
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
                           )}
                         </td>
                         <td className="p-4">
@@ -480,13 +600,7 @@ export default function HistoryPage() {
                     )}
                   </div>
                 </div>
-                {selectedJob.threadId && (
-                  <div className="col-span-2">
-                    <p className="font-medium text-muted-foreground">Gmail Thread ID</p>
-                    <p className="font-mono text-xs break-all">{selectedJob.threadId}</p>
-                  </div>
-                )}
-                {(selectedJob.replyCount ?? 0) > 0 && (
+                {hasReplied(selectedJob) && (
                   <>
                     <div>
                       <p className="font-medium text-muted-foreground">Replies</p>
@@ -504,6 +618,31 @@ export default function HistoryPage() {
                   </>
                 )}
               </div>
+              {canOpenGmailThread(selectedJob) && (
+                <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+                  <p className="font-medium text-sm">Gmail conversation</p>
+                  <p className="text-xs text-muted-foreground">
+                    Open the full thread with timestamps and everything the contact wrote.
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => {
+                      openGmailThread(selectedJob.id);
+                    }}
+                  >
+                    <MessageSquare className="h-4 w-4" />
+                    View full thread
+                  </Button>
+                </div>
+              )}
+              {hasReplied(selectedJob) && !selectedJob.threadId && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-900 p-3 text-xs text-amber-900 dark:text-amber-200">
+                  Replies are detected, but this send is not linked to a Gmail thread yet. Connect Gmail and run{' '}
+                  <strong>Sync replies</strong> in Settings, then open this record again.
+                </div>
+              )}
               <div>
                 <p className="mb-1 font-medium text-muted-foreground">Subject</p>
                 <p className="rounded-lg bg-muted/50 p-3">{selectedJob.renderedSubject}</p>
@@ -568,6 +707,15 @@ export default function HistoryPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <GmailThreadDialog
+        jobId={gmailThreadJobId}
+        open={gmailThreadOpen}
+        onOpenChange={(next) => {
+          setGmailThreadOpen(next);
+          if (!next) setGmailThreadJobId(null);
+        }}
+      />
 
       <SendReminderModal
         open={reminderOpen}

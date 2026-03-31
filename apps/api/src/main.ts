@@ -6,11 +6,14 @@ import helmet from 'helmet';
 import { join } from 'path';
 import * as fs from 'fs';
 import { AppModule } from './app.module';
+import { PrismaClientExceptionFilter } from './prisma/prisma-client-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['error', 'warn', 'log'],
   });
+
+  app.useGlobalFilters(new PrismaClientExceptionFilter());
 
   // Ensure uploads directory exists
   const uploadsDir = join(process.cwd(), 'uploads');

@@ -2,7 +2,12 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, Re
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CompanyNotesService } from './company-notes.service';
-import { CreateCompanyNoteDto, UpdateCompanyNoteDto, CompanyNotesFilterDto } from './company-notes.dto';
+import {
+  CreateCompanyNoteDto,
+  UpdateCompanyNoteDto,
+  CompanyNotesFilterDto,
+  ContactCompanySuggestionsQueryDto,
+} from './company-notes.dto';
 
 @ApiTags('company-notes')
 @ApiBearerAuth()
@@ -10,6 +15,16 @@ import { CreateCompanyNoteDto, UpdateCompanyNoteDto, CompanyNotesFilterDto } fro
 @Controller('company-notes')
 export class CompanyNotesController {
   constructor(private companyNotesService: CompanyNotesService) {}
+
+  /** Distinct company names from imported contacts (for quick-add). */
+  @Get('contact-companies')
+  contactCompanies(@Query() query: ContactCompanySuggestionsQueryDto, @Request() req) {
+    return this.companyNotesService.getContactCompanySuggestions(
+      req.user.sub,
+      query.q,
+      query.limit,
+    );
+  }
 
   @Get()
   findAll(@Query() filter: CompanyNotesFilterDto, @Request() req) {

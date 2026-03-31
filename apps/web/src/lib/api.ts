@@ -1,5 +1,36 @@
-import axios from 'axios';
+import axios, { isAxiosError } from 'axios';
 import Cookies from 'js-cookie';
+
+/** Client cap so the campaign UI does not wait indefinitely if the server hangs. */
+const GENDER_DETECT_REQUEST_TIMEOUT_MS = 75_000;
+
+export type DetectGendersResultRow = {
+  contactId: string;
+  firstName: string | null;
+  gender: 'male' | 'female' | null;
+  probability: number;
+  autoAssigned: boolean;
+};
+
+export type DetectGendersResponse = {
+  results: DetectGendersResultRow[];
+  externalDetectionBlocked?: boolean;
+  externalDetectionMessage?: string;
+};
+
+export function getDetectGendersErrorMessage(err: unknown): string {
+  if (isAxiosError(err)) {
+    if (err.code === 'ECONNABORTED' || /timeout/i.test(err.message)) {
+      return 'Gender detection timed out. Please assign genders manually or skip this step.';
+    }
+    const data = err.response?.data as { externalDetectionMessage?: string; message?: string } | undefined;
+    if (data?.externalDetectionMessage && typeof data.externalDetectionMessage === 'string') {
+      return data.externalDetectionMessage;
+    }
+    if (typeof data?.message === 'string') return data.message;
+  }
+  return 'Could not reach the gender detection service. Please assign genders manually or skip.';
+}
 
 /** Same-origin `/api` works when next.config.js rewrites to the Nest server; override with full URL if needed. */
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
@@ -53,6 +84,11 @@ export const csvApi = {
 export const contactsApi = {
   getAll: (params?: Record<string, any>) =>
     api.get('/contacts', { params }).then((r) => r.data),
+  /** Same filters as getAll; returns every matching id (no pagination). */
+  getFilteredIds: (params?: Record<string, any>) =>
+    api.get('/contacts/filtered-ids', { params }).then((r) => r.data) as Promise<{ ids: string[]; total: number }>,
+  lookupByIds: (ids: string[]) =>
+    api.post('/contacts/lookup', { ids }).then((r) => r.data) as Promise<{ data: any[] }>,
   getStats: () => api.get('/contacts/stats').then((r) => r.data),
   getOne: (id: string) => api.get(`/contacts/${id}`).then((r) => r.data),
   create: (data: any) => api.post('/contacts', data).then((r) => r.data),
@@ -144,7 +180,11 @@ export const campaignsApi = {
   create: (data: any) => api.post('/campaigns', data).then((r) => r.data),
   cancel: (id: string) => api.delete(`/campaigns/${id}`).then((r) => r.data),
   detectGenders: (contactIds: string[]) =>
-    api.post('/campaigns/detect-genders', { contactIds }).then((r) => r.data),
+    api
+      .post<DetectGendersResponse>('/campaigns/detect-genders', { contactIds }, {
+        timeout: GENDER_DETECT_REQUEST_TIMEOUT_MS,
+      })
+      .then((r) => r.data),
 };
 
 // ── Routing Rules ─────────────────────────────────────────────────────────────
@@ -170,22 +210,75 @@ export const routingRulesApi = {
     api.post('/routing-rules/preview', { contactIds, fallbackTemplateId }).then((r) => r.data),
 };
 
-// ── Company Notes ─────────────────────────────────────────────────────────────
+// ── Company Notes / application tracker ───────────────────────────────────────
 export const companyNotesApi = {
-  getAll: (params?: { search?: string; page?: number; limit?: number }) =>
-    api.get('/company-notes', { params }).then((r) => r.data),
+  getAll: (params?: {
+    search?: string;
+    page?: number;
+    limit?: number;
+    status?: string;
+    hideArchived?: boolean;
+  }) => api.get('/company-notes', { params }).then((r) => r.data),
+  getContactCompanies: (params?: { q?: string; limit?: number }) =>
+    api.get('/company-notes/contact-companies', { params }).then((r) => r.data) as Promise<{
+      data: { companyName: string; sampleContactId: string }[];
+    }>,
   getOne: (id: string) => api.get(`/company-notes/${id}`).then((r) => r.data),
-  create: (data: { companyName: string; content?: string; links?: { label: string; url: string }[] }) =>
-    api.post('/company-notes', data).then((r) => r.data),
-  update: (id: string, data: { companyName?: string; content?: string; links?: { label: string; url: string }[] }) =>
-    api.patch(`/company-notes/${id}`, data).then((r) => r.data),
+  create: (data: {
+    companyName?: string;
+    content?: string;
+    links?: { label: string; url: string }[];
+    status?: string;
+    sourceContactId?: string;
+    reminderAt?: string | null;
+    reminderTimezone?: string;
+    reminderRecurrenceDays?: number | null;
+    reminderStopOnApplied?: boolean;
+  }) => api.post('/company-notes', data).then((r) => r.data),
+  update: (
+    id: string,
+    data: {
+      companyName?: string;
+      content?: string;
+      links?: { label: string; url: string }[];
+      status?: string;
+      sourceContactId?: string | null;
+      reminderAt?: string | null;
+      reminderTimezone?: string;
+      reminderRecurrenceDays?: number | null;
+      reminderStopOnApplied?: boolean;
+    },
+  ) => api.patch(`/company-notes/${id}`, data).then((r) => r.data),
   remove: (id: string) => api.delete(`/company-notes/${id}`).then((r) => r.data),
+};
+
+/** GET /email-jobs/analytics — aggregated outreach performance for the dashboard. */
+export type OutreachAnalytics = {
+  summary: {
+    sent: number;
+    replied: number;
+    replyRate: number;
+    scheduled: number;
+    failed: number;
+  };
+  byTemplate: {
+    templateId: string | null;
+    templateName: string;
+    sent: number;
+    replies: number;
+    replyRate: number;
+  }[];
+  byTag: { tag: string; sent: number; replies: number; replyRate: number }[];
+  trends: { day: string; sent: number; replies: number }[];
+  trendDays: number;
 };
 
 // ── Email Jobs ─────────────────────────────────────────────────────────────────
 export const emailJobsApi = {
   getAll: (params?: Record<string, any>) =>
     api.get('/email-jobs', { params }).then((r) => r.data),
+  getAnalytics: (params?: { trendDays?: number }) =>
+    api.get<OutreachAnalytics>('/email-jobs/analytics', { params }).then((r) => r.data),
   getOne: (id: string) => api.get(`/email-jobs/${id}`).then((r) => r.data),
   getContactActivity: (contactId: string) =>
     api.get(`/email-jobs/contact/${contactId}`).then((r) => r.data),
@@ -194,4 +287,8 @@ export const emailJobsApi = {
   sendNow: (id: string) => api.post(`/email-jobs/send-now/${id}`).then((r) => r.data),
   sendReminder: (data: { emailJobIds: string[]; templateId: string; customSubject?: string; customBodyHtml?: string }) =>
     api.post('/email-jobs/remind', data).then((r) => r.data),
+  /** Sync reply counts from Gmail threads (requires Gmail connected with read access). */
+  syncReplies: () => api.post('/email-jobs/sync-replies').then((r) => r.data),
+  /** Full Gmail thread messages for a job (requires Gmail + job.threadId). */
+  getGmailThread: (id: string) => api.get(`/email-jobs/${id}/gmail-thread`).then((r) => r.data),
 };

@@ -15,8 +15,59 @@ import { mergeTemplateContext } from '../templates/template-merge-context';
 
 const GENDERIZE_BATCH_SIZE = 10;
 const GENDERIZE_REQUEST_TIMEOUT_MS = 8000;
-const GENDERIZE_RETRY_DELAY_MS = 2000;
+const GENDERIZE_TRANSIENT_RETRY_DELAY_MS = 1500;
 const GENDER_CONFIDENCE_THRESHOLD = 0.70;
+
+const GENDERIZE_LIMIT_USER_MESSAGE =
+  'Gender detection limit reached — automatic detection could not continue. Please assign genders manually.';
+
+const GENDERIZE_TIMEOUT_USER_MESSAGE =
+  'Gender detection timed out — please choose the template variant manually.';
+
+export type DetectGendersResultRow = {
+  contactId: string;
+  firstName: string | null;
+  gender: 'male' | 'female' | null;
+  probability: number;
+  autoAssigned: boolean;
+};
+
+export type DetectGendersResponse = {
+  results: DetectGendersResultRow[];
+  externalDetectionBlocked?: boolean;
+  externalDetectionMessage?: string;
+};
+
+type GenderizeExternalCtx = {
+  stopped: boolean;
+  message?: string;
+};
+
+/** genderize.io quota / rate limit / subscription signals — fail fast (no batch splitting or 429 backoff). */
+function isGenderizeLimitOrQuotaSignal(status: number, bodyText: string, jsonError?: string | null): boolean {
+  if (status === 429 || status === 402) return true;
+  const combined = `${bodyText}\n${jsonError ?? ''}`;
+  if (
+    /\b(quota|rate limit|too many requests|request limit|daily limit|monthly limit|api limit|usage limit|throttl)\b/i.test(
+      combined,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(limit reached|exceeded your|exceeded the|subscription|upgrade your|not enough credits|insufficient)\b/i.test(
+      combined,
+    )
+  ) {
+    return true;
+  }
+  if (status === 403 && /\b(limit|quota|api)\b/i.test(combined)) return true;
+  return false;
+}
+
+function isAbortOrTimeoutError(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
 
 /** Stable key for dedupe + map lookup: trim, collapse spaces, strip BOM/ZWSP, NFC, Turkish lowercase. */
 function normalizeFirstNameKey(raw: string): string {
@@ -184,13 +235,14 @@ export class CampaignsService {
       }
     };
 
+    const externalCtx: GenderizeExternalCtx = { stopped: false };
+
     const fetchGenderizeBatch = async (
       batch: string[],
       countryId: string | null,
-      allowRetry429: boolean,
-      allowSplitOnLimit: boolean,
+      allowTransientRetry: boolean,
     ): Promise<void> => {
-      if (batch.length === 0) return;
+      if (batch.length === 0 || externalCtx.stopped) return;
 
       const params = batch.map((n, idx) => `name[${idx}]=${encodeURIComponent(n)}`).join('&');
       const apiKey = process.env.GENDERIZE_API_KEY;
@@ -208,29 +260,16 @@ export class CampaignsService {
         fetch(url, { signal: AbortSignal.timeout(GENDERIZE_REQUEST_TIMEOUT_MS) });
 
       try {
-        let res = await doFetch();
-        if (res.status === 429 && allowRetry429) {
-          await new Promise((r) => setTimeout(r, GENDERIZE_RETRY_DELAY_MS));
-          res = await doFetch();
-          if (genderDetectDebug) {
-            this.logger.log(`genderize retry after 429, status=${res.status}`);
-          }
-        }
-
+        const res = await doFetch();
         const bodyText = await res.text();
+
         if (!res.ok) {
           this.logger.warn(
             `genderize.io HTTP ${res.status} (countryId=${countryId ?? 'none'}): ${bodyText.slice(0, 500)}`,
           );
-          if (
-            allowSplitOnLimit &&
-            batch.length > 1 &&
-            (res.status === 429 || /limit/i.test(bodyText))
-          ) {
-            const mid = Math.ceil(batch.length / 2);
-            await fetchGenderizeBatch(batch.slice(0, mid), countryId, false, true);
-            await new Promise((r) => setTimeout(r, 300));
-            await fetchGenderizeBatch(batch.slice(mid), countryId, false, true);
+          if (isGenderizeLimitOrQuotaSignal(res.status, bodyText, null)) {
+            externalCtx.stopped = true;
+            externalCtx.message = GENDERIZE_LIMIT_USER_MESSAGE;
           }
           return;
         }
@@ -250,11 +289,9 @@ export class CampaignsService {
         if (data && typeof data === 'object' && !Array.isArray(data) && 'error' in data) {
           const msg = String((data as { error?: string }).error ?? JSON.stringify(data));
           this.logger.warn(`genderize.io error payload: ${msg}`);
-          if (allowSplitOnLimit && batch.length > 1 && /limit/i.test(msg)) {
-            const mid = Math.ceil(batch.length / 2);
-            await fetchGenderizeBatch(batch.slice(0, mid), countryId, false, true);
-            await new Promise((r) => setTimeout(r, 300));
-            await fetchGenderizeBatch(batch.slice(mid), countryId, false, true);
+          if (isGenderizeLimitOrQuotaSignal(200, bodyText, msg)) {
+            externalCtx.stopped = true;
+            externalCtx.message = GENDERIZE_LIMIT_USER_MESSAGE;
           }
           return;
         }
@@ -265,35 +302,42 @@ export class CampaignsService {
         this.logger.warn(
           `genderize.io request failed (countryId=${countryId ?? 'none'}, batchSize=${batch.length}): ${err}`,
         );
-        if (allowRetry429) {
-          await new Promise((r) => setTimeout(r, GENDERIZE_RETRY_DELAY_MS));
-          await fetchGenderizeBatch(batch, countryId, false, allowSplitOnLimit);
+        if (isAbortOrTimeoutError(err)) {
+          externalCtx.stopped = true;
+          externalCtx.message = GENDERIZE_TIMEOUT_USER_MESSAGE;
+          return;
+        }
+        if (allowTransientRetry) {
+          await new Promise((r) => setTimeout(r, GENDERIZE_TRANSIENT_RETRY_DELAY_MS));
+          await fetchGenderizeBatch(batch, countryId, false);
         }
       }
     };
 
     // Second pass: genderize.io with TR (then global fallback for still-unknown names)
     for (let i = 0; i < namesToFetch.length; i += GENDERIZE_BATCH_SIZE) {
+      if (externalCtx.stopped) break;
       const batch = namesToFetch.slice(i, i + GENDERIZE_BATCH_SIZE);
-      await fetchGenderizeBatch(batch, 'TR', true, true);
+      await fetchGenderizeBatch(batch, 'TR', true);
     }
 
     const stillMissing = namesToFetch.filter((n) => !genderByName.has(n));
-    if (stillMissing.length) {
+    if (stillMissing.length && !externalCtx.stopped) {
       if (genderDetectDebug) {
         this.logger.log(
           `genderize global fallback for ${stillMissing.length} name(s) still missing after TR`,
         );
       }
       for (let i = 0; i < stillMissing.length; i += GENDERIZE_BATCH_SIZE) {
+        if (externalCtx.stopped) break;
         const batch = stillMissing.slice(i, i + GENDERIZE_BATCH_SIZE);
-        await fetchGenderizeBatch(batch, null, true, true);
+        await fetchGenderizeBatch(batch, null, true);
       }
     }
 
     const contactMap = new Map(contacts.map((c) => [c.id, c]));
 
-    return contactIds.map((contactId) => {
+    const results: DetectGendersResultRow[] = contactIds.map((contactId) => {
       const contact = contactMap.get(contactId);
       const name = contact?.firstName ? normalizeFirstNameKey(contact.firstName) : '';
       const detection = name ? genderByName.get(name) : null;
@@ -306,6 +350,13 @@ export class CampaignsService {
         autoAssigned: detection != null && detection.probability >= GENDER_CONFIDENCE_THRESHOLD,
       };
     });
+
+    const out: DetectGendersResponse = { results };
+    if (externalCtx.stopped) {
+      out.externalDetectionBlocked = true;
+      out.externalDetectionMessage = externalCtx.message ?? GENDERIZE_LIMIT_USER_MESSAGE;
+    }
+    return out;
   }
 
   // ── Campaign creation ────────────────────────────────────────────────────────

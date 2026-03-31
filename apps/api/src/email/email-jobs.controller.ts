@@ -18,6 +18,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { EmailService } from './email.service';
 import { TemplateRendererService } from '../templates/template-renderer.service';
+import { GmailReplySyncService } from '../gmail-auth/gmail-reply-sync.service';
+import { GmailThreadViewService } from '../gmail-auth/gmail-thread-view.service';
+import { EmailAnalyticsService } from './email-analytics.service';
 
 class SendReminderDto {
   @IsArray()
@@ -45,6 +48,9 @@ export class EmailJobsController {
     private schedulerService: SchedulerService,
     private emailService: EmailService,
     private renderer: TemplateRendererService,
+    private gmailReplySync: GmailReplySyncService,
+    private gmailThreadView: GmailThreadViewService,
+    private emailAnalytics: EmailAnalyticsService,
   ) {}
 
   @Get()
@@ -73,6 +79,8 @@ export class EmailJobsController {
       if (status === 'NOT_REPLIED') {
         where.status = 'SENT';
         where.replyCount = 0;
+      } else if (status.toUpperCase() === 'REPLIED') {
+        where.OR = [{ status: 'REPLIED' }, { replyCount: { gt: 0 } }];
       } else {
         where.status = status.toUpperCase();
       }
@@ -123,6 +131,13 @@ export class EmailJobsController {
     return { data, total, page: p, limit: l, totalPages: Math.ceil(total / l) };
   }
 
+  /** Aggregated reply & template/tag performance for the dashboard (static path before :contactId). */
+  @Get('analytics')
+  async analytics(@Query('trendDays') trendDays: string, @Request() req) {
+    const d = Math.min(120, Math.max(7, parseInt(trendDays ?? '30', 10) || 30));
+    return this.emailAnalytics.getDashboard(req.user.sub, d);
+  }
+
   @Get('contact/:contactId')
   async getContactActivity(
     @Param('contactId') contactId: string,
@@ -154,6 +169,18 @@ export class EmailJobsController {
     else if (hasScheduled) contactEmailStatus = 'scheduled';
 
     return { contact, jobs, emailStatus: contactEmailStatus };
+  }
+
+  /** Pull reply state from Gmail threads (requires connected Gmail + gmail.readonly). */
+  @Post('sync-replies')
+  async syncReplies(@Request() req) {
+    return this.gmailReplySync.syncUserReplies(req.user.sub, 'manual');
+  }
+
+  /** Full Gmail thread for an email job (requires connected Gmail + threadId on the job). */
+  @Get(':id/gmail-thread')
+  async getGmailThread(@Param('id') id: string, @Request() req) {
+    return this.gmailThreadView.getThreadForEmailJob(req.user.sub, id);
   }
 
   /** Static path before @Get(':id') so "send-now" is never captured as an id. */

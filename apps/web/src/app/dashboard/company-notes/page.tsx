@@ -38,6 +38,7 @@ import {
   Bell,
   Archive,
   Loader2,
+  Copy,
 } from 'lucide-react';
 import { cn, formatDate } from '@/lib/utils';
 import type { CompanyNote, CompanyNoteLink, CompanyTrackerStatus } from '@hunterreach/shared';
@@ -98,6 +99,10 @@ function fromDatetimeLocalValue(local: string): string | null {
   const d = new Date(local);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+function copyCompanyName(name: string) {
+  void navigator.clipboard?.writeText(name).catch(() => {});
 }
 
 // ── Add company dialog ────────────────────────────────────────────────────────
@@ -481,7 +486,18 @@ function DetailPanel({
       <div className="flex items-start justify-between gap-2 border-b px-5 py-4 shrink-0">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold truncate">{note.companyName}</h2>
+            <h2 className="text-lg font-semibold truncate select-text cursor-text">{note.companyName}</h2>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+              title="Copy company name"
+              aria-label="Copy company name"
+              onClick={() => copyCompanyName(note.companyName)}
+            >
+              <Copy className="h-4 w-4" />
+            </Button>
             <Badge variant={statusBadgeVariant(note.status)}>{STATUS_LABEL[note.status]}</Badge>
           </div>
           <p className="text-xs text-muted-foreground mt-1">
@@ -876,7 +892,23 @@ export default function CompanyNotesPage() {
                     <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-sm">{note.companyName}</span>
+                          <span className="font-semibold text-sm select-text cursor-text">
+                            {note.companyName}
+                          </span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                            title="Copy company name"
+                            aria-label="Copy company name"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              copyCompanyName(note.companyName);
+                            }}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </Button>
                           <Badge variant={statusBadgeVariant(note.status)} className="font-normal">
                             {STATUS_LABEL[note.status]}
                           </Badge>

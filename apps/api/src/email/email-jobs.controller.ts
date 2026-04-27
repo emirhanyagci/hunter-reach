@@ -59,10 +59,13 @@ export class EmailJobsController {
     @Query('campaignId') campaignId: string,
     @Query('email') email: string,
     @Query('company') company: string,
+    @Query('contactName') contactName: string,
     @Query('templateId') templateId: string,
     @Query('replied') replied: string,
     @Query('dateFrom') dateFrom: string,
     @Query('dateTo') dateTo: string,
+    @Query('scheduledDateFrom') scheduledDateFrom: string,
+    @Query('scheduledDateTo') scheduledDateTo: string,
     @Query('page') page = '1',
     @Query('limit') limit = '50',
     @Request() req,
@@ -102,6 +105,16 @@ export class EmailJobsController {
     if (company) {
       where.contact = { ...where.contact, company: { contains: company, mode: 'insensitive' } };
     }
+    const nameQ = contactName?.trim();
+    if (nameQ) {
+      where.contact = {
+        ...where.contact,
+        OR: [
+          { firstName: { contains: nameQ, mode: 'insensitive' } },
+          { lastName: { contains: nameQ, mode: 'insensitive' } },
+        ],
+      };
+    }
 
     if (dateFrom || dateTo) {
       where.sentAt = {};
@@ -110,6 +123,16 @@ export class EmailJobsController {
         const to = new Date(dateTo);
         to.setHours(23, 59, 59, 999);
         where.sentAt.lte = to;
+      }
+    }
+
+    if (scheduledDateFrom || scheduledDateTo) {
+      where.scheduledAt = {};
+      if (scheduledDateFrom) where.scheduledAt.gte = new Date(scheduledDateFrom);
+      if (scheduledDateTo) {
+        const toSch = new Date(scheduledDateTo);
+        toSch.setHours(23, 59, 59, 999);
+        where.scheduledAt.lte = toSch;
       }
     }
 
